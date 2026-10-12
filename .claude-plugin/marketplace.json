@@ -1,0 +1,8 @@
+{
+  "name": "orderathome",
+  "description": "cockpit：Claude Code 的右側面板 mod",
+  "owner": { "name": "Justin Chung" },
+  "plugins": [
+    { "name": "cockpit", "source": "./cockpit", "description": "右側面板：模型與深度切換、用量色塊，以及任務、常用 prompt、SKILL、設定四個分頁" }
+  ]
+}

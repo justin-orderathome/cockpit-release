@@ -1,0 +1,21 @@
+{
+  "name": "cockpit",
+  "version": "0.5.3",
+  "description": "右側面板：模型與深度切換、用量色塊，以及任務、常用 prompt、SKILL、設定四個分頁",
+  "author": { "name": "Justin Chung" },
+  "license": "UNLICENSED",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "accent": { "type": "string", "title": "強調色", "description": "目前分頁、進行中項目與「繼續」的主題色", "default": "claude", "options": ["claude", "suggestion", "remember", "planMode", "autoAccept", "ide", "permission", "merged"] },
+    "yellow": { "type": "string", "title": "黃色門檻", "description": "用量色塊轉黃的百分比", "default": "50", "options": ["40", "50", "60", "70", "80", "90"] },
+    "red": { "type": "string", "title": "紅色門檻", "description": "用量色塊轉紅的百分比", "default": "80", "options": ["40", "50", "60", "70", "80", "90"] },
+    "toast": { "type": "string", "title": "toast 門檻", "description": "用量剛跨過這個百分比時跳 toast；off 表示關閉", "default": "80", "options": ["off", "70", "80", "90"] },
+    "autoOpen": { "type": "string", "title": "自動開啟", "description": "session 開始時自動開啟面板", "default": "on", "options": ["on", "off"] },
+    "defaultTab": { "type": "string", "title": "預設分頁", "description": "開啟時停在哪一頁；last 表示上次停的", "default": "last", "options": ["last", "tasks", "basic", "skill"] },
+    "inlineRows": { "type": "string", "title": "inline 行數", "description": "面板顯示在輸入框上方時，B 區最多幾行", "default": "8", "options": ["4", "6", "8", "10", "12"] },
+    "translate": { "type": "string", "title": "翻譯 SKILL 說明", "description": "用 haiku 把 SKILL 的英文說明翻成繁體中文，結果會快取", "default": "on", "options": ["on", "off"] },
+    "howto": { "type": "string", "title": "整理 SKILL 用法", "description": "用 haiku 把每個 skill 的 SKILL.md 整理成用法（何時用、怎麼叫、會做什麼、搭配），結果會快取；關掉就不呼叫模型，也不顯示用法", "default": "on", "options": ["on", "off"] },
+    "skillLayout": { "type": "string", "title": "SKILL 排列方式", "description": "[SKILL] 分頁一組裡的 skill 怎麼排：grid 橫向排成等寬的幾欄（欄數隨面板寬度變），list 一個一行", "default": "grid", "options": ["grid", "list"] },
+    "autoUpdate": { "type": "string", "title": "自動更新", "description": "session 開始時自己檢查有沒有發布新版，有就下載，下次開啟時換上；關掉時只在 [設定] 按「檢查版本」才檢查", "default": "off", "options": ["on", "off"] }
+  }
+}
