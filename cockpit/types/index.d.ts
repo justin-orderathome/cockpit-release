@@ -199,6 +199,10 @@ declare module 'claude-code' {
       roadmapFolds: Record<string, boolean>
       /** 是否顯示已完成的 effort */
       showDoneEfforts: boolean
+      /** 上次查到的發布版本，留著的標示看它；'' 表示還沒查到過。也存在 $.store */
+      releasedVersion: string
+      /** 已經下載、還沒換上的版本，標示是不是「已下載」看它；'' 表示沒有。也存在 $.store */
+      downloadedVersion: string
       /** SKILL 說明的繁體中文翻譯，鍵是 command.list 的完整名稱；也存在 $.store */
       translations: Record<string, { source: string; summary: string; description: string }>
       /**

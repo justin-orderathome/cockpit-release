@@ -14,6 +14,7 @@ import type {
   Ticket,
   UsageSnapshot,
 } from '../types'
+import { NO_CHANGELOG, changelogBeside, changelogIn, notesBetween, withNotes } from './changelog'
 import { FIELDS, TABS, parseSettings, rawValues } from './config'
 import type { Field, Settings } from './config'
 import type { Ask } from './ask'
@@ -29,20 +30,28 @@ import type { Row } from './layout'
 import { singleJob } from './once'
 import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
 import {
+  INDICATOR_MARK,
   RELEASE_MANIFEST,
+  STARTUP_CHECK_DELAY,
+  SWITCH_NOW,
   UPDATE_LATER,
-  UPDATE_NOW,
   catalogPath,
+  indicatorFor,
   installedFrom,
   marketplaceDir,
   refreshCommand,
   releasedManifest,
+  shouldCheck,
+  shouldDownload,
+  shouldNotify,
+  shouldRestore,
   updateCommand,
   verdict,
   versionIn,
+  wordingFor,
 } from './release'
-import type { Install, Verdict } from './release'
-import { justReloaded, startTab, storedList, storedTranslations, toggled, versionChanged } from './remembered'
+import type { Indicator, Install, Verdict } from './release'
+import { justReloaded, startTab, storedList, storedTranslations, storedVersion, toggled, versionChanged } from './remembered'
 import { TRACKER_DOC, roadmapWatch, touchesRoadmap, trackerRoot, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
 import { EMPTY_OVERRIDES, SAMPLE_OVERRIDES, filterSkills, groupSkills, listedCommands, parseOverrides } from './skills'
@@ -115,6 +124,10 @@ const openEfforts = atom({ plugin: 'cockpit', key: 'openEfforts' } as const, [] 
 /** 路線圖裡手動攤開或收起過的組與「已結案」；只記這個 session，重開回到預設 */
 const roadmapFolds = atom({ plugin: 'cockpit', key: 'roadmapFolds' } as const, {} as Record<string, boolean>)
 const showDoneEfforts = atom({ plugin: 'cockpit', key: 'showDoneEfforts' } as const, false)
+/** 上次查到的發布版本，留著的標示看它；'' 是還沒查到過。只有從 marketplace 裝的那一份會寫 */
+const releasedVersion = atom({ plugin: 'cockpit', key: 'releasedVersion' } as const, '')
+/** 已經下載、還沒換上的版本，標示是不是「已下載」看它；'' 是沒有 */
+const downloadedVersion = atom({ plugin: 'cockpit', key: 'downloadedVersion' } as const, '')
 
 /**
  * 目前的設定：`settings` 是解析過的值，`raw` 是 userConfig 存的原始字串（[設定] 的下拉選單用）。
@@ -301,6 +314,47 @@ async function readVersion($: EngineInterface): Promise<string> {
   } catch {}
   pluginVersion = version
   return version
+}
+
+// 這一份是從哪裡裝的；問過一次就記著（模組重載時重來）
+let installed: { from: Install | undefined } | undefined
+
+/**
+ * 這一份是從哪個 marketplace 裝的；從資料夾載入的是 undefined。
+ * 面板測試不能指定 plugin 的資料夾，要假裝成裝來的就設環境變數 `COCKPIT_TEST_PLUGIN_ROOT`，值是假裝的資料夾
+ * （`…/plugins/cache/<marketplace>/<plugin>/<版本>`）。只拿來判斷這一份是從哪裡裝的，讀檔仍然讀真的資料夾；
+ * 沒設（正式環境）就看真的資料夾。
+ */
+async function installOf($: EngineInterface): Promise<Install | undefined> {
+  if (installed !== undefined) return installed.from
+  let pretended: string | undefined
+  try {
+    // 引擎規定變數名稱要直接寫成字面值
+    pretended = await $.env.get('COCKPIT_TEST_PLUGIN_ROOT')
+  } catch {}
+  installed = { from: installedFrom(pretended ?? $.plugin.root) }
+  return installed.from
+}
+
+/** 現在該留著哪一種標示（版本號那一列與分頁列的「設定」都看它）；沒有是 undefined。 */
+async function shownIndicator($: EngineInterface): Promise<Indicator | undefined> {
+  const [released, downloaded] = await Promise.all([read($, releasedVersion), read($, downloadedVersion)])
+  return indicatorFor({ install: await installOf($), current: await readVersion($), released, downloaded })
+}
+
+// 記著的兩個版本各寫兩處：`$.store`（給下次開場）與 atom（讓面板上的標示跟著換）。
+// atom 一樣的不必再寫（寫了就重畫）；`update` 的對象要寫明是哪個 atom，所以兩份各寫一個函式
+
+/** 記下這次查到的發布版本。 */
+async function rememberReleased($: EngineInterface, version: string) {
+  await $.store.set('releasedVersion', version)
+  if ((await read($, releasedVersion)) !== version) await update($, releasedVersion, () => version)
+}
+
+/** 記下已經下載、還沒換上的是哪一版（`null` 是沒有）。 */
+async function rememberDownloaded($: EngineInterface, version: string | null) {
+  await $.store.set('downloadedVersion', version)
+  if ((await read($, downloadedVersion)) !== (version ?? '')) await update($, downloadedVersion, () => version ?? '')
 }
 
 /**
@@ -491,11 +545,15 @@ const UPDATE_TIMEOUT = 120_000
  * 看現在發布的是哪一版，和這一份比；看不到當作查不到。
  * 從 marketplace 裝的：先把 marketplace 拉到最新，讀它本機 clone 裡的 plugin.json（就是更新會裝的那一版）。
  * 從資料夾載入的：只能上網看發布 repo。
+ * 從 marketplace 裝的查到了就記下查到的版本：留著的標示看它，所以開場的檢查與手動的「檢查版本」都會更新。
+ * 檢查的時間不在這裡記（`rememberChecked`）：查到了、該做的事也做成了才算檢查過。
+ * `changelog` 是發布的那一份更新紀錄（clone 裡、plugin.json 旁邊，剛拉到最新所以不必再上網）；從資料夾載入的沒有。
  */
-async function checkRelease($: EngineInterface): Promise<{ current: string; found: Verdict }> {
+async function checkRelease($: EngineInterface): Promise<{ current: string; found: Verdict; changelog?: string }> {
   const current = await readVersion($)
-  const install = installedFrom($.plugin.root)
+  const install = await installOf($)
   let latest = ''
+  let changelog: string | undefined
   try {
     if (install) {
       const ran = await $.process.run(refreshCommand(install), { timeoutMs: UPDATE_TIMEOUT })
@@ -503,61 +561,131 @@ async function checkRelease($: EngineInterface): Promise<{ current: string; foun
         const dir = marketplaceDir(await homeDir($), install.marketplace)
         const manifest = releasedManifest(dir, await files($).read(catalogPath(dir)), install.plugin)
         if (manifest !== undefined) latest = versionIn(await files($).read(manifest))
+        if (manifest !== undefined && latest !== '' && latest !== current)
+          changelog = await files($).read(changelogBeside(manifest))
       }
     } else {
       const reply = await $.http.fetch(RELEASE_MANIFEST)
       if (reply.ok) latest = versionIn(reply.text)
     }
   } catch {}
-  return { current, found: verdict(current, latest, install) }
+  if (install && latest !== '') await rememberReleased($, latest)
+  return { current, found: verdict(current, latest, install), changelog }
 }
 
-/** 把發布的那一版下載到磁碟上（跑著的這一份不變）；失敗時跳 toast 並回 false。 */
-async function downloadUpdate($: EngineInterface, install: Install): Promise<boolean> {
+/**
+ * 記下這次檢查過了，開場檢查隔多久看它。查不到發布的版本、或開場該在背景做的下載沒做成時不記：
+ * 那不算檢查過，下次開場不等四小時就再試。
+ */
+const rememberChecked = async ($: EngineInterface) => $.store.set('checkedAt', await $.clock.now())
+
+/**
+ * 把發布的那一版下載到磁碟上（跑著的這一份不變）；失敗時跳 toast 並回 false。
+ * `quiet` 是開場在背景下載的那一次：失敗不講，下次檢查再試。
+ */
+async function downloadUpdate($: EngineInterface, install: Install, quiet = false): Promise<boolean> {
+  const failed = (reason: string | number) => {
+    if (!quiet) $.ui.toast(`無法更新 cockpit：${reason}`)
+    return false
+  }
   try {
     const ran = await $.process.run(updateCommand(install), { timeoutMs: UPDATE_TIMEOUT })
-    if (ran.exitCode !== 0) {
-      $.ui.toast(`無法更新 cockpit：${(ran.stderr.trim() || ran.stdout.trim()).split('\n')[0] || ran.exitCode}`)
-      return false
-    }
-    return true
+    return ran.exitCode === 0 || failed((ran.stderr.trim() || ran.stdout.trim()).split('\n')[0] || ran.exitCode)
   } catch (err) {
-    $.ui.toast(`無法更新 cockpit：${reasonOf(err)}`)
-    return false
+    return failed(reasonOf(err))
   }
 }
 
-/** [設定] 的「檢查版本」：和發布的版本不一樣就問要不要立即更新，要的話下載後重新載入 mod。 */
+/**
+ * 查到發布的版本就是裝著的這一版時收尾（開場檢查與「檢查版本」共用）：之前下載、還沒換上的紀錄不再算數。
+ * 已下載的是別的版本（作者發了又收回）時磁碟上還是那一版，下次開啟會換上它，所以先把磁碟換回發布的版本
+ * （和下載是同一個指令），成功才清掉紀錄。換不回去就安靜略過、紀錄留著，也不算檢查過，下次再試。
+ */
+async function settleSame($: EngineInterface, current: string) {
+  const install = await installOf($)
+  if (install !== undefined) {
+    const downloaded = storedVersion(await $.store.get('downloadedVersion'))
+    if (shouldRestore(current, downloaded) && !(await downloadUpdate($, install, true))) return
+    await rememberChecked($)
+  }
+  await rememberDownloaded($, null)
+}
+
+/**
+ * [設定] 的「檢查版本」：和發布的版本不一樣就問要不要立即更新（退版時問要不要換上），要的話下載後重新載入 mod。
+ * 升版時問句後面列出這幾版的更新紀錄；退版或讀不到更新紀錄時照樣問，只是不列。
+ */
 async function checkVersion($: EngineInterface) {
-  const { current, found } = await checkRelease($)
+  const { current, found, changelog } = await checkRelease($)
   if (found.kind === 'unknown') return void $.ui.toast('查不到發布的版本，請確認網路後再試')
-  // 發布的和裝的一樣了：之前自動下載、還沒換上的紀錄不再算數
-  if (found.kind === 'same') await $.store.set('downloadedVersion', null)
-  if (found.kind === 'same') return void $.ui.toast(`cockpit ${current} 已經是發布的版本`)
+  if (found.kind === 'same') {
+    await settleSame($, current)
+    return void $.ui.toast(`cockpit ${current} 已經是發布的版本`)
+  }
+  if (found.kind === 'update') await rememberChecked($)
   if (found.kind === 'manual')
     return void $.ui.toast(`發布的版本是 ${found.latest}；這一份是從資料夾載入的，請自行換成新版`)
+  const words = wordingFor(current, found.latest)
+  // 問過就算提示過這一版，之後開場不再為它提示
+  await $.store.set('notifiedVersion', found.latest)
   let answer: string
   try {
-    answer = await $.ui.ask(`cockpit 發布的版本是 ${found.latest}（目前 ${current}），要立即更新嗎？`, [UPDATE_NOW, UPDATE_LATER])
+    const question = withNotes(words.question(current, found.latest), notesBetween(changelog, current, found.latest))
+    answer = await $.ui.ask(question, [words.accept, UPDATE_LATER])
   } catch {
     // 把詢問關掉就是先不要
     return
   }
-  if (answer !== UPDATE_NOW) return
-  $.ui.toast(`正在更新到 cockpit ${found.latest}…`)
+  if (answer !== words.accept) return
+  $.ui.toast(words.switching(found.latest))
   if (!(await downloadUpdate($, found.install))) return
-  await $.store.set('downloadedVersion', found.latest)
+  await rememberDownloaded($, found.latest)
   await reloadMods($)
 }
 
-/** 設定打開「自動更新」時開場做的事：有不一樣的版本就下載，下次開啟時換上；同一版只下載一次。 */
-async function autoUpdate($: EngineInterface) {
-  const { found } = await checkRelease($)
-  if (found.kind !== 'update') return
-  if ((await $.store.get('downloadedVersion')) === found.latest) return
-  if (!(await downloadUpdate($, found.install))) return
-  await $.store.set('downloadedVersion', found.latest)
-  $.ui.toast(`cockpit ${found.latest} 已下載，下次開啟時換上`)
+/** [設定] 的「更新紀錄」：用編輯器打開裝著的那一份；這一版沒有那個檔就說沒有。 */
+async function openChangelog($: EngineInterface) {
+  const path = changelogIn($.plugin.root)
+  if ((await files($).read(path)) === undefined) return void $.ui.toast(NO_CHANGELOG)
+  await openInEditor($, path, undefined, '已開啟更新紀錄')
+}
+
+/**
+ * 開場查到不一樣的版本、而且該自己下載時（「自動更新」開著，或作者退版）做的事：下載，下次開啟時換上；同一版只下載一次。
+ * 回傳這一版是不是已經在磁碟上了。下載失敗不講原因、回 false，標示維持還沒下載的樣子。
+ */
+async function autoUpdate($: EngineInterface, found: Extract<Verdict, { kind: 'update' }>): Promise<boolean> {
+  if ((await $.store.get('downloadedVersion')) === found.latest) return true
+  if (!(await downloadUpdate($, found.install, true))) return false
+  await rememberDownloaded($, found.latest)
+  return true
+}
+
+/**
+ * 開場的檢查：從 marketplace 裝的那一份，距離上次檢查滿四小時才去看發布的版本，「自動更新」開不開都看。
+ * 不一樣而「自動更新」開著，或發布的版本比裝的舊（退版，「自動更新」關著也一樣）：在背景下載。
+ * 升版而「自動更新」關著：不下載；標示由 `checkRelease` 記下的版本留著。
+ * 每個發布的版本開場只提示一次，不管是哪一句：下載好了講已下載，沒下載（不必下載或下載失敗）講到 [設定] 按「檢查版本」；
+ * 提示過（含在「檢查版本」被問過）的那一版，之後下載好了也不再講。
+ * 背景的下載失敗不算檢查過：不記檢查的時間，下次開場再試。
+ * 發布的版本就是裝著的這一版：把之前下載、還沒換上的別的版本換回去（`settleSame`）。
+ * 在背景跑，查不到或中途出錯都安靜略過。
+ */
+async function startupCheck($: EngineInterface) {
+  try {
+    const [checkedAt, now] = await Promise.all([$.store.get('checkedAt'), $.clock.now()])
+    if (!shouldCheck(await installOf($), checkedAt, now)) return
+    const { current, found } = await checkRelease($)
+    if (found.kind === 'same') return void (await settleSame($, current))
+    if (found.kind !== 'update') return
+    const isWanted = shouldDownload(current, found.latest, config.settings.autoUpdate)
+    const isDownloaded = isWanted && (await autoUpdate($, found))
+    if (isDownloaded || !isWanted) await rememberChecked($)
+    if (!shouldNotify(found.latest, await $.store.get('notifiedVersion'))) return
+    await $.store.set('notifiedVersion', found.latest)
+    const words = wordingFor(current, found.latest)
+    $.ui.toast(isDownloaded ? words.downloadedNotice(found.latest) : words.availableNotice(found.latest))
+  } catch {}
 }
 
 // ── 填入輸入框 ───────────────────────────────────────────
@@ -618,17 +746,23 @@ async function toggleFold($: EngineInterface, fold: Fold, id: string) {
 async function restoreRemembered(
   $: EngineInterface,
 ): Promise<{ lastTab: unknown; reloadingAt: unknown; seenVersion: unknown }> {
-  const [lastTab, reloadingAt, seenVersion, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups] = await Promise.all([
+  const [lastTab, reloadingAt, seenVersion, released, downloaded, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, install] = await Promise.all([
     $.store.get('lastTab'),
     $.store.get('reloadingAt'),
     $.store.get('seenVersion'),
+    $.store.get('releasedVersion'),
+    $.store.get('downloadedVersion'),
     $.store.get('translations'),
     $.store.get('howtos'),
     $.store.get('openEfforts'),
     $.store.get('openSkillGroups'),
     $.store.get('closedPromptGroups'),
+    installOf($),
   ])
   await Promise.all([
+    // 上次查到的發布版本：沒有重新檢查的這次開場，標示也照它留著；從資料夾載入的不標示
+    update($, releasedVersion, () => (install !== undefined ? storedVersion(released) : '')),
+    update($, downloadedVersion, () => (install !== undefined ? storedVersion(downloaded) : '')),
     update($, openEfforts, list => storedList(efforts) ?? list),
     update($, openSkillGroups, list => storedList(skillGroups) ?? list),
     update($, closedPromptGroups, list => storedList(promptGroups) ?? list),
@@ -1419,6 +1553,9 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
 const LABEL_WIDTH = Math.max(...FIELDS.map(f => textWidth(f.label)))
 const padded = (label: string) => label + ' '.repeat(LABEL_WIDTH - textWidth(label))
 
+/** 留著的標示用的顏色：和目前分頁的強調色分開，停在 [設定] 時也看得出來 */
+const INDICATOR_COLOR = 'warning'
+
 /** [設定] 分頁：每個參數一個下拉選單，值存在 userConfig；改了模組會重載。 */
 async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabContent> {
   const { Box, Text, Button } = ui
@@ -1488,15 +1625,28 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
     id: 'set-reload',
     value: <Button key="reload-mods" label="重新載入 mod" onPress={() => void reloadMods($)} />,
   })
-  // 最下面一行是目前裝的版本，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版
+  // 最下面一行是目前裝的版本，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版。
+  // 發布的版本和裝的不同時，版本號後面留著高亮的標示，換上之後才消失。已經下載的話按鈕換成「立即換上」：
+  // 不必詢問，重新載入 mod 就換上（不必重開 Claude Code），由新的那一份在開場講現在是哪一版
   const version = await readVersion($)
+  const indicator = await shownIndicator($)
   if (version !== '')
     rows.push({
       id: 'set-version',
       value: (
         <Box flexDirection="row" gap={2}>
           <Text dimColor>{`cockpit ${version}`}</Text>
-          <Button key="check-version" label="檢查版本" plain onPress={() => void checkVersion($)} />
+          {indicator && (
+            <Text bold color={INDICATOR_COLOR}>
+              {indicator.text}
+            </Text>
+          )}
+          {indicator?.kind === 'downloaded' ? (
+            <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void reloadMods($)} />
+          ) : (
+            <Button key="check-version" label="檢查版本" plain onPress={() => void checkVersion($)} />
+          )}
+          <Button key="changelog" label="更新紀錄" plain onPress={() => void openChangelog($)} />
         </Box>
       ),
     })
@@ -1534,11 +1684,12 @@ export const register: Register = (on, options) => {
     ])
     const { settings } = config
     const { lastTab, reloadingAt, seenVersion } = await restoreRemembered($)
-    // 版本和上次開場時不一樣（升版或退版）：講一聲換到哪一版
+    // 版本和上次開場時不一樣：講一聲換到哪一版（版本號變小是作者退版，說「退回」）
     const version = await readVersion($)
-    const isNewVersion = versionChanged(seenVersion, version)
-    if (version !== '' && version !== seenVersion) await $.store.set('seenVersion', version)
-    if (isNewVersion) $.ui.toast(`cockpit 已更新到 ${version}`)
+    const seen = typeof seenVersion === 'string' ? seenVersion : undefined
+    const isNewVersion = versionChanged(seen, version)
+    if (version !== '' && version !== seen) await $.store.set('seenVersion', version)
+    if (isNewVersion && seen !== undefined) $.ui.toast(wordingFor(seen, version).switched(version))
     // 剛按過「重新載入 mod」：這一份是重載後的，回報一聲（已經講過換版就不重複）
     if (typeof reloadingAt === 'number') {
       await $.store.set('reloadingAt', null)
@@ -1552,7 +1703,8 @@ export const register: Register = (on, options) => {
     void loadSkills($)
     void roadmapChanged($, { kind: 'open' })
     if (settings.autoOpen) void $.ui.open({ id: PANE, title: TITLE })
-    if (settings.autoUpdate) void autoUpdate($)
+    // 發布的版本排在最後、隔一下才去看：上面的事都排出去、面板開出來之後才開始，檢查不擋住面板的顯示
+    $.clock.after(STARTUP_CHECK_DELAY, () => void startupCheck($))
 
     // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器）
     syncTicker($, await read($, board))
@@ -1695,6 +1847,7 @@ export const register: Register = (on, options) => {
     // 其餘時候計時器跳了也不會重畫這個面板
     if (currentTab === 'tasks' && hasRunning(taskBoard)) await read($, tick)
     if (usageNow.rateLimits.length > 0) await read($, minute)
+    const indicator = await shownIndicator($)
 
     // ── 分頁列：[任務] 的標籤帶著進度 ──
     const view = viewTasks(taskBoard, now)
@@ -1702,9 +1855,11 @@ export const register: Register = (on, options) => {
       t.id === 'tasks' && view.main.total > 0 && view.main.doneCount < view.main.total
         ? `${t.label} ${view.main.doneCount}/${view.main.total}`
         : t.label
+    // 有留著的標示時，「設定」變色並帶記號：停在別的分頁也看得出 [設定] 裡有事
+    const isFlagged = (id: Tab) => id === 'settings' && indicator !== undefined
     // 分頁列有哪幾段、多寬由 layout 算；這裡照段落畫
     const bar = tabBarOf(
-      TABS.map(t => ({ id: t.id, label: tabLabel(t), hotkey: t.hotkey })),
+      TABS.map(t => ({ id: t.id, label: isFlagged(t.id) ? `${t.label} ${INDICATOR_MARK}` : tabLabel(t), hotkey: t.hotkey })),
       currentTab,
     )
     const { columns: cols, isTabsOnBorder } = chrome(e.props.bodyColumns, bar.width)
@@ -1719,10 +1874,14 @@ export const register: Register = (on, options) => {
             </Text>
           ) : s.kind === 'current' ? (
             <Box key={`tab-${s.id}`}>
-              <Text bold color={accent}>
+              <Text bold color={isFlagged(s.id) ? INDICATOR_COLOR : accent}>
                 {s.text}
               </Text>
             </Box>
+          ) : isFlagged(s.id) ? (
+            <Button key={`tab-${s.id}`} plain hotkey={s.hotkey} onPress={() => void setTab($, s.id)}>
+              <Text color={INDICATOR_COLOR}>{s.text}</Text>
+            </Button>
           ) : (
             <Button key={`tab-${s.id}`} label={s.text} plain hotkey={s.hotkey} onPress={() => void setTab($, s.id)} />
           ),

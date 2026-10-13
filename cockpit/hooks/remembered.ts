@@ -13,7 +13,10 @@ import type { Translations } from './translate'
  * - `translations`、`howtos`：模型產生的快取（`howtos` 的驗證在 `howto.ts`）。
  * - `reloadingAt`：按「重新載入 mod」的時間，給重載後的那一份回報用。
  * - `seenVersion`：上次開場時的版本，用來發現換了版本。
- * - `downloadedVersion`：自動更新已經下載、還沒換上的版本，免得同一版下載兩次。
+ * - `downloadedVersion`：已經下載、還沒換上的版本，免得同一版下載兩次；它就是發布的版本時標示是「已下載」。
+ * - `checkedAt`：上次檢查過發布版本的時間，開場檢查隔多久看它（規則在 `release.ts`）；查不到、或開場該做的下載沒做成時不記。
+ * - `releasedVersion`：上次查到的發布版本，留著的標示看它；沒有重新檢查的開場也照它顯示。
+ * - `notifiedVersion`：已經提示過的發布版本，同一版不提示第二次。
  *
  * 只記這個 session 的（不在這裡）：路線圖裡票的收合、是否顯示已完成的 effort、搜尋字串、翻到第幾頁。
  */
@@ -27,6 +30,9 @@ export const toggled = (list: readonly string[], id: string): string[] =>
   list.includes(id) ? list.filter(x => x !== id) : [...list, id]
 
 const isText = (v: unknown): v is string => typeof v === 'string'
+
+/** 存起來的版本號（`releasedVersion`、`downloadedVersion`）；沒存過或形狀不對是空的，就是沒有 */
+export const storedVersion = (value: unknown): string => (isText(value) ? value : '')
 
 /** 存起來的翻譯；形狀不對的整筆丟掉，下次再翻 */
 export function storedTranslations(value: unknown): Translations {

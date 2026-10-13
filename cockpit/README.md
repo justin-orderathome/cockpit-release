@@ -63,26 +63,126 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 
 ## 安裝
 
-需要 Claude Code 2.1.294 以上（用 `claude --version` 確認）。
+需要 Windows、Claude Code 2.1.294 以上（用 `claude --version` 確認）與 `git`。cockpit 從公開的發布 repo `justin-orderathome/cockpit-release` 安裝，第一次安裝與從舊的資料夾搬過來都用同一種做法。
 
-1. 把 `cockpit` 資料夾放在本機一個固定的位置，例如 `C:\Tools\cockpit`（macOS／Linux 例如 `~/tools/cockpit`）。拿到的是 zip 就先解壓縮；資料夾的第一層要看得到 `hooks` 與 `.claude-plugin`。
-2. 在 `~/.claude/settings.json`（Windows 是 `C:\Users\<你的帳號>\.claude\settings.json`）的 `env` 加上這個資料夾的路徑。檔案裡已經有 `env` 的話，把這一行加進去就好；路徑一律用正斜線：
+### 貼一段文字給 Claude Code
+
+開 Claude Code，把下面整段貼進去送出。它會先確認這台機器裝得起來，再備份並修改設定檔、把原本的設定與快取帶過來、刪掉舊的 cockpit 資料夾，最後列出改了什麼。照它最後說的，把所有 Claude Code 關掉再開，就會自己裝起來。
+
+```text
+請幫我在這台 Windows 電腦上安裝 cockpit（Claude Code 的右側面板）。原本是用資料夾載入的話，一併搬到新的安裝方式。照下面七步依序做，每一步的「確認」成立才做下一步。
+
+每一步只有三種結果：
+- 完成：「確認」成立，做下一步。
+- 略過：這一步要處理的東西本來就不存在（例如沒有舊資料夾）。記下略過與原因，做下一步。
+- 停下來：指令失敗、檔案讀不懂，或「確認」不成立。後面的步驟都不做，告訴我停在第幾步、看到的完整訊息、到目前為止改了哪些檔，以及最後「退路」那一段。
+
+「設定檔」指 %USERPROFILE%\.claude\settings.json。只改下面寫到的鍵，其餘內容與排版原樣保留：用編輯檔案的工具改那幾行，不用 PowerShell 把整份 JSON 讀進來再寫回去（會弄亂排版與中文）。
+
+第 1 步　確認這台機器裝得起來（只查，不改任何東西）
+  執行 git --version
+    找不到 git：停下來。請我先裝 Git for Windows（在 PowerShell 執行 winget install Git.Git），裝好後把 Claude Code 全部關掉再開，把這段文字重貼一次。
+  執行 git ls-remote https://github.com/justin-orderathome/cockpit-release.git
+    失敗：停下來。把完整的錯誤訊息給我，請我轉給 Justin。
+  確認：兩個指令都成功，第二個至少印出一行 commit。
+
+第 2 步　備份設定檔
+  把設定檔複製成同一個資料夾裡的 settings.backup-cockpit-<年月日-時分秒>.json。
+  設定檔不存在：略過（第 3 步會建立一份新的）。
+  確認：備份檔存在，大小與設定檔相同。記下備份檔的完整路徑。
+
+第 3 步　改設定檔的三處
+  (a) env 裡的 CLAUDE_CODE_PLUGIN_DIRS
+      它的值是用 ; 隔開的一個或多個資料夾。逐一讀 <資料夾>\.claude-plugin\plugin.json，name 是 cockpit 的那一個就是「舊資料夾」：記下它的完整路徑，把它從值裡拿掉，其餘的資料夾照原樣留著。值裡只有它一個時，把 CLAUDE_CODE_PLUGIN_DIRS 這一行整個拿掉。
+      沒有這個鍵，或沒有任何一個資料夾符合：略過，並記下「沒有舊資料夾」。路徑裡有 cockpit 字樣卻不符合的，原樣留著，最後告訴我。
+  (b) extraKnownMarketplaces 裡的 orderathome，內容是：
+          "orderathome": {
+            "source": { "source": "github", "repo": "justin-orderathome/cockpit-release" }
+          }
+      extraKnownMarketplaces 已經存在時，把這一筆加進現有的那一段。orderathome 這一筆已經存在時，把它改成和上面一樣；裡面有 "autoUpdate" 就把那一行拿掉。
+  (c) enabledPlugins 裡加上 "cockpit@orderathome": true
+      enabledPlugins 已經存在時，把這一筆加進現有的那一段。
+  確認：設定檔解析得過（是合法的 JSON）；extraKnownMarketplaces 與 enabledPlugins 在最外層各只出現一次；重讀檔案，(a)(b)(c) 的值都和上面寫的一樣；和備份比，只有這三處不同。
+  解析不過：把備份複製回設定檔，然後停下來。
+
+第 4 步　把原本在 [設定] 改過的值帶過來
+  把設定檔裡 pluginConfigs["cockpit@inline"] 的內容原樣複製一份，放在 pluginConfigs["cockpit@orderathome"]。原本那一筆留著。
+  沒有 pluginConfigs["cockpit@inline"]，或 pluginConfigs["cockpit@orderathome"] 已經存在：略過，已經存在的那一筆不動。
+  確認：設定檔解析得過，兩筆的內容相同。
+
+第 5 步　把翻譯與用法的快取帶過來
+  來源：%USERPROFILE%\.claude\plugins\store\cockpit_inline-e1f824f0cbe5.json
+  目的：%USERPROFILE%\.claude\plugins\store\cockpit_orderathome-7aade36bdd60.json
+  把來源複製成目的。來源留著。
+  來源不存在，或目的已經存在：略過，已經存在的目的檔不動。
+  確認：目的檔存在，大小與來源相同。
+
+第 6 步　刪掉舊資料夾
+  第 3 步記下「沒有舊資料夾」：略過。
+  刪之前重讀一次 <舊資料夾>\.claude-plugin\plugin.json：檔案存在而且 name 是 cockpit 才把整個舊資料夾刪掉。不是的話留著，最後告訴我它的路徑與沒刪的原因。
+  刪不掉（檔案被占用）：留著，最後請我把 Claude Code 全部關掉之後自己刪，然後照常做第 7 步。
+  確認：舊資料夾已經不存在，或已記下留著的原因。
+
+第 7 步　告訴我改了什麼
+  先查系統層級的環境變數（只查不改），在 PowerShell 執行：
+    [Environment]::GetEnvironmentVariable('CLAUDE_CODE_PLUGIN_DIRS','User')
+    [Environment]::GetEnvironmentVariable('CLAUDE_CODE_PLUGIN_DIRS','Machine')
+  有值的話在清單裡寫出來，並提醒我：裡面如果有舊的 cockpit 資料夾要自己拿掉，不拿掉的話跑的仍是舊的那一份，而且不會有任何提示。
+  然後列一份清單，七步每一步各一行，寫完成、略過（原因）或沒做（原因），並包含：
+    - 備份檔的完整路徑
+    - 設定檔裡每一個改過的鍵，改之前與改之後的值
+    - 快取檔有沒有複製
+    - 舊資料夾的路徑，刪了還是留著
+  最後請我做這件事：把所有 Claude Code 視窗關掉再開。第一次開啟會自己下載安裝，大約一分鐘內右側出現面板；切到 [設定] 捲到最下面，看得到 cockpit 與版本號就是裝好了。面板沒有自己出現時打 /cockpit。
+
+退路（任何一步停下來，或重開之後面板不正常時告訴我）
+  把第 2 步的備份檔複製回 %USERPROFILE%\.claude\settings.json（第 2 步略過的話，把第 3 步新建的設定檔刪掉），再向 Justin 要一份 cockpit 的 zip。
+```
+
+### 手動的步驟（備案）
+
+不想讓 Claude Code 替你改設定檔時照這裡做。先確認裝得起來：在 PowerShell 執行 `git --version` 與 `git ls-remote https://github.com/justin-orderathome/cockpit-release.git`，兩個都要成功；沒有 `git` 就先執行 `winget install Git.Git`。
+
+1. 關掉所有 Claude Code，備份設定檔：
+
+   ```powershell
+   Copy-Item $HOME\.claude\settings.json $HOME\.claude\settings.backup-cockpit.json
+   ```
+
+2. 用記事本開 `%USERPROFILE%\.claude\settings.json`，改三處：
+
+   - **拿掉舊的資料夾**：`"env"` 裡有 `"CLAUDE_CODE_PLUGIN_DIRS"` 的話，把 cockpit 的那一個資料夾從值裡拿掉（多個資料夾用 `;` 隔開）；只有它一個就整行刪掉。不拿掉的話跑的還是舊的那一份，而且沒有任何提示。
+   - **加上 marketplace**：在最外層的 `{ }` 裡加上 `extraKnownMarketplaces` 的 `orderathome`。
+   - **啟用**：在 `enabledPlugins` 加上 `"cockpit@orderathome": true`。
 
    ```json
-   {
-     "env": {
-       "CLAUDE_CODE_PLUGIN_DIRS": "C:/Tools/cockpit"
+   "extraKnownMarketplaces": {
+     "orderathome": {
+       "source": { "source": "github", "repo": "justin-orderathome/cockpit-release" }
      }
+   },
+   "enabledPlugins": {
+     "cockpit@orderathome": true
    }
    ```
 
-   原本就有別的路徑時，用系統的路徑分隔符號接在後面：Windows 是 `;`，macOS／Linux 是 `:`。
+   原本就有 `extraKnownMarketplaces` 或 `enabledPlugins` 時，把裡面那一筆加進現有的段落，不要重複開一段。
 
-3. 重開 Claude Code。之後每個 session 都會自動載入；`claude plugin list` 會看到 `cockpit@inline`，面板沒有自己出現的話打 `/cockpit`。
+3. 原本用資料夾載入、想把設定與快取帶過來的話（不做也能用，只是 [設定] 回到預設值，翻譯與用法會重新整理一輪）：
 
-只想在單一 session 試用的話，也可以用 `claude --plugin-dir C:/Tools/cockpit`。
+   - 設定：把設定檔裡 `pluginConfigs` 的 `"cockpit@inline"` 那一筆複製一份，鍵改成 `"cockpit@orderathome"`。
+   - 快取：`cockpit_orderathome-7aade36bdd60.json` 還不存在時才複製。
 
-**更新**：用新版的資料夾整個取代舊的，再重開 Claude Code。你的設定、常用 prompt 與 SKILL 覆寫都存在別的地方（`settings.json` 與 `~/.claude/cockpit/`），不會被蓋掉。
+     ```powershell
+     Copy-Item $HOME\.claude\plugins\store\cockpit_inline-e1f824f0cbe5.json $HOME\.claude\plugins\store\cockpit_orderathome-7aade36bdd60.json
+     ```
+
+4. 存檔，開 Claude Code。第一次開啟會自己下載安裝，大約一分鐘內右側出現面板；[設定] 最下面看得到 `cockpit` 與版本號就是裝好了。面板沒有自己出現的話打 `/cockpit`。
+5. 確認面板正常之後，把舊的 cockpit 資料夾刪掉。
+
+**出事時的退路**：把設定檔的備份複製回 `%USERPROFILE%\.claude\settings.json`，再向作者要一份 zip。
+
+**之後的更新**不必重裝，見下面的「更新」一節。你的設定、常用 prompt 與 SKILL 覆寫都存在別的地方（`settings.json` 與 `~/.claude/cockpit/`），換版不會被蓋掉。
 
 **裝之前要知道的**：
 
@@ -156,7 +256,7 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 
 ### 面板參數
 
-在 [設定] 分頁或 `/config` 都能改，兩邊改的是同一份值，存在 `settings.json` 的 `pluginConfigs`。改了立即生效，[設定] 最下面有 `[ 恢復預設值 ]` 與 `[ 重新載入 mod ]`（面板狀態不對時救急用：跑內建的 `/reload-plugins`，所有 mod 一起重載，cockpit 重載完會跳「cockpit 已重新載入」），再下面一行是目前裝的版本（例如 `cockpit 0.5.3`），後面有「檢查版本」（見下方「更新」）。
+在 [設定] 分頁或 `/config` 都能改，兩邊改的是同一份值，存在 `settings.json` 的 `pluginConfigs`。改了立即生效，[設定] 最下面有 `[ 恢復預設值 ]` 與 `[ 重新載入 mod ]`（面板狀態不對時救急用：跑內建的 `/reload-plugins`，所有 mod 一起重載，cockpit 重載完會跳「cockpit 已重新載入」），再下面一行是目前裝的版本（`cockpit x.y.z`），後面有「檢查版本」與「更新紀錄」；發布的版本和裝的不同時，版本號後面會留著高亮的「有新版 x.y.z」，已經下載的話是「x.y.z 已下載，重開後換上」、按鈕換成「立即換上」（見下方「更新」）。
 
 | 參數 | 預設 | 選項 |
 | --- | --- | --- |
@@ -170,16 +270,23 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 | 翻譯說明 | 開 | 開／關 |
 | 整理用法 | 開 | 開／關 |
 | 排列方式（[SKILL] 一組裡的 skill 怎麼排） | 橫向 | 橫向／垂直 |
-| 自動更新（開場時自己看有沒有發布新版） | 關 | 開／關 |
+| 自動更新（開場查到不同的版本時自己下載，下次開啟換上；作者退版是例外，關著也會自己下載） | 關 | 開／關 |
 
 ### 更新
 
 發布的版本以公開的發布 repo `justin-orderathome/cockpit-release` 裡 `plugin.json` 的 `version` 為準。檢查時先請 Claude Code 把 marketplace 拉到最新，再讀它在本機的那一份，所以問你的版本號就是實際會換上的那一版。比的是「和你裝的一不一樣」，不是「比較新」，所以作者退回舊版時也會跟著換。
 
-- **檢查版本**：[設定] 最下面版本號後面的按鈕。按了去看發布的版本：一樣就說已經是發布的版本；不一樣就問「要立即更新嗎？」，選「立即更新」會下載新版並重新載入 mod，換好後跳「cockpit 已更新到 x.y.z」；選「先不要」什麼都不做。
-- **自動更新**（[設定]，預設關）：打開後，每次 session 開始時自己檢查一次，有不一樣的版本就在背景下載，跳「cockpit x.y.z 已下載，下次開啟時換上」；不會打斷正在用的這個 session。同一版只下載一次。
-- **換了版本會講**：不管是怎麼換的，開場時發現版本和上次不一樣，就跳「cockpit 已更新到 x.y.z」。
-- **只對從 marketplace 裝的有效**：檢查是跑 `claude plugin marketplace update`，更新是跑 `claude plugin update`。用資料夾加 `CLAUDE_CODE_PLUGIN_DIRS` 載入的那一份，「檢查版本」改成上網看發布 repo（剛發布的幾分鐘內可能還是舊的），只會告訴你發布的是哪一版，要自己換；自動更新對它沒有作用。
+- **開場檢查**：從 marketplace 裝的 cockpit 每次開場都在背景看一次發布的版本，「自動更新」開不開都看，不必記得去按「檢查版本」。它排在開場的最後、面板開出來之後才開始，不會讓面板比較慢出現。距離上次檢查不到四小時就跳過（一天開很多個 session 時不會每次都去看）；手動按「檢查版本」不受這個限制。查不到（沒有網路、指令失敗、逾時）就安靜略過，下次開場再試。
+- **有新版時**：發布的版本和裝的不同、而「自動更新」關著時，不會下載，只跳一次「cockpit 有新版 x.y.z，到 [設定] 按「檢查版本」換上」。同一個發布的版本只提示一次；作者再發下一版時，那一版再提示一次。這裡說的是發布的版本比裝的新；比裝的舊（作者退版）見下面的「退版」。
+- **留著的標示**：錯過提示也看得到。發布的版本和裝的不同時，兩處同時留著標示：[設定] 最下面版本號後面高亮的「有新版 x.y.z」，以及分頁列的「設定」變色並帶一個「●」（停在別的分頁也看得出來）。標示不能手動點掉，在詢問選「先不要」也還在；換上之後（裝的和發布的一樣了）才消失。上次查到的發布版本記在 cockpit 的狀態檔，所以四小時內重開、沒有重新檢查時標示也還在。「自動更新」已經把發布的版本下載好時，版本號後面的字換成「x.y.z 已下載，重開後換上」，那一列的按鈕從「檢查版本」換成「立即換上」。
+- **檢查版本**：[設定] 最下面版本號後面的按鈕。按了去看發布的版本：一樣就說已經是發布的版本；不一樣就問「要立即更新嗎？」，選「立即更新」會下載新版並重新載入 mod，換好後跳「cockpit 已更新到 x.y.z」；選「先不要」不會下載，標示留著。升版時問句下面會列出你裝的版本之後、到發布的版本為止每一版的更新紀錄（新的在前，最多六條，超過時最後一行是「其餘見更新紀錄」）；發布的那一版沒有更新紀錄就只問不列。發布的版本比裝的舊（作者退版）時，問的是「發布的版本已退回 x.y.z，要立即換上嗎？」，選項是「立即換上」，不列更新紀錄。
+- **更新紀錄**：版本號那一列的另一顆按鈕，用 VS Code 打開你裝著的那一版附的 `CHANGELOG.md`，隨時查得到每一版改了什麼；那一版沒有附就跳「這一版沒有更新紀錄」。
+- **自動更新**（[設定]，預設關）：打開後，開場檢查查到不一樣的版本就在背景下載，跳「cockpit x.y.z 已下載，下次開啟時換上」，標示換成「已下載」；不會打斷正在用的這個 session。同一版只下載一次，同一個發布的版本也只提示一次，不管是哪一句：已經跳過「有新版 x.y.z」或在「檢查版本」被問過的那一版，之後下載好了只換標示，不再跳「已下載」。背景的下載失敗時不講失敗的原因，改跳那一句「cockpit 有新版 x.y.z，到 [設定] 按「檢查版本」換上」（一樣每版一次），標示維持「有新版 x.y.z」；這次不算檢查過，下次開場不必等四小時就會再試。
+- **退版**：作者收回出事的版本時，發布的版本會比你裝的舊。這時開場檢查不管「自動更新」開不開都在背景下載，跳一次「cockpit 發布的版本已退回 x.y.z，已下載，下次開啟時換上」，下次開啟 Claude Code 就退回那一版；想當下就換，按「立即換上」。這是「自動更新」關著時唯一不問你就下載的情況：出事的版本不該留在你的機器上等你有空才換。標示寫的是「已退回 x.y.z，重開後換上」，按鈕是「立即換上」；背景的下載失敗時不講失敗的原因，改跳一次「cockpit 發布的版本已退回 x.y.z，到 [設定] 按「檢查版本」換上」，標示是「發布的版本已退回 x.y.z」，按鈕是「檢查版本」（按了會問要不要立即換上）；這次不算檢查過，下次開場不必等四小時就會再試。換上之後跳「cockpit 已退回 x.y.z」，標示消失。版本號不是純數字、比不出新舊時照升版處理，不會自己下載。
+- **立即換上**：新版已經下載、還沒換上時，[設定] 版本號那一列的按鈕。按了不會再問，直接重新載入 mod，當下就換成新版，不必重開 Claude Code；換好後跳「cockpit 已更新到 x.y.z」（退版是「cockpit 已退回 x.y.z」），標示消失。不按也沒關係，下次開啟 Claude Code 時一樣會換上。已下載之後作者又發了別的版本時，已下載的那一版不算數：標示照新的發布版本重新判斷（回到「有新版」，等下載好再變成「已下載」）。
+- **下載之後作者又收回**：已經下載了 x.y.z 還沒換上，發布的版本又變回你現在裝的這一版時（作者把 x.y.z 收回了），cockpit 會把磁碟上的那一份換回發布的版本，免得下次開啟換成被收回的 x.y.z。開場檢查與手動按「檢查版本」都會做，不會跳訊息；沒換成就安靜略過，下次開場（不必等四小時）或下次按「檢查版本」再試。
+- **換了版本會講**：不管是怎麼換的，開場時發現版本和上次不一樣，就跳「cockpit 已更新到 x.y.z」；版本號變小（作者退版）時跳「cockpit 已退回 x.y.z」。
+- **只對從 marketplace 裝的有效**：檢查是跑 `claude plugin marketplace update`，更新是跑 `claude plugin update`。用資料夾加 `CLAUDE_CODE_PLUGIN_DIRS` 載入的那一份，「檢查版本」改成上網看發布 repo（剛發布的幾分鐘內可能還是舊的），只會告訴你發布的是哪一版，要自己換；它開場不檢查、沒有標示，自動更新對它也沒有作用。
 - 連不上會說查不到，不影響其他功能。
 
 ### SKILL 說明的翻譯
@@ -234,12 +341,39 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 claude plugin validate .     # 檢查設定檔與 hooks module
 claude plugin test .         # 跑 tests/ 底下的測試
 npx -p typescript tsc -p .   # 型別檢查
-git archive --format=zip --prefix=cockpit/ -o dist/cockpit-0.5.3.zip HEAD .claude-plugin hooks types README.md LICENSE   # 打包成給別人安裝的 zip（先 commit；只含執行需要的檔與授權聲明）
+node --test scripts/publish.test.mjs   # 跑發布指令的測試（和上面的測試分開跑）
 ```
+
+### 發布
+
+```
+node scripts/publish.mjs --dry-run   # 預演：檢查照跑，印出會發布哪個 commit、哪個版本號、哪些檔；不推、不打 tag
+node scripts/publish.mjs             # 發布目前的 HEAD
+node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一版（帶它的 tag 名稱）
+```
+
+發布之前先做三件事：在 `.claude-plugin/plugin.json` 改版本號（只有這一處要改）、在 `CHANGELOG.md` 加一個標題剛好是版本號的段落（`## x.y.z`）、commit 並推到 `main`。指令不替你改版本號，也不替你 commit。
+
+指令會依序做：
+
+1. **檢查**，全部通過才往下：版本號的 tag 沒有打在別的 commit 上、工作目錄是乾淨的、HEAD 已經推到遠端的 `main`、更新紀錄有這一版的條目，再跑上面的驗證、測試與型別檢查。
+2. 把發布 repo 重新 clone 到暫存資料夾，整個換掉裡面的 `cockpit/`（`.claude-plugin`、`hooks`、`types`、`README.md`、`LICENSE`、`CHANGELOG.md`，內容取自 commit，不是工作目錄），並把根目錄的 `LICENSE` 換成同一份。marketplace 的目錄檔與根目錄的 README 不碰。
+3. 發布的版本和這次的版本號一樣、內容卻不同時停下來，請你先改版本號：同事機器上的快取是照版本號認的，版本號沒變就拿不到新內容。
+4. commit（訊息是「cockpit x.y.z（原始碼 abc1234）」）並推到發布 repo，再在被發布的 commit 打 `vx.y.z` 並推到原始碼 repo。這個 tag 就是之後退版的目標。
+
+任何一步失敗都會印出失敗在哪一步，結束碼不是零。發布 repo 推上去之後才失敗（例如 tag 沒推成功）的，直接重跑：內容已經一樣時不會多一個 commit，只補上 tag。
+
+**退版**：發出去的版本出事時，帶上先前那一版的 tag 名稱再跑一次（`git tag -l` 看有哪些），發布的版本就換回那一版，內容與版本號都取自那個 tag 指向的 commit。這是出事時用的，所以不要求工作目錄乾淨、不要求已推送，也不跑驗證、測試、型別檢查與更新紀錄的檢查，手上改到一半也能立刻退。發布 repo 照樣往前多一個 commit（歷史不改寫），tag 已經在就不再打；同事那邊不管「自動更新」開不開都會跟著退回。可以先加 `--dry-run` 預演。只收版本的 tag（`vx.y.z`），分支與 commit 的 hash 不收；指定的 tag 不存在會停下來。
+
+**用過的版本號不再用**：退版之後修好要再發，一定要換一個新的版本號，就算出事的那一版只發出去幾分鐘。裝過那一版的機器快取是照版本號認的，同一個版本號換了內容，它們會沿用出事的那一份。指令會擋下來：版本的 tag 已經打在別的 commit 上時拒絕發布。
+
+`--release-repo <位置>` 與 `--skip-checks`（跳過驗證、測試與型別檢查）只給測試用。測試會建兩個暫存的 git repo（原始碼 repo 與本機的 bare 發布 repo）讓指令真的跑完，不會碰到真的發布 repo。
 
 `register.tsx` 很長是引擎的規定造成的：`$` 只能傳給同一個檔案裡宣告的函式，atom 也要寫在用它的檔案裡，兩者都不會跟著 import 進別的檔案（違反時 mod 會載入失敗）。所以碰到引擎的程式留在那裡，不碰引擎的判斷（顯示哪些字、多寬、幾行、何時重讀）才拆到別的檔案，也才有直接的測試。
 
 型別檢查用的 `tsconfig.json`，延伸的是 `.claude-plugin/types/` 裡的型別設定。那個資料夾由 Claude Code 在載入 mod 時自動產生（已加進 `.gitignore`），所以要先載入過一次才能做型別檢查。
+
+面板測試裡的 cockpit 是從資料夾載入的，測試工具也沒有辦法指定 plugin 的資料夾。要測「從 marketplace 安裝」才有的行為（開場檢查、標示、「檢查版本」的詢問），就在測試的環境變數裡設 `COCKPIT_TEST_PLUGIN_ROOT`，值是假裝的安裝資料夾（`…/plugins/cache/<marketplace>/<plugin>/<版本>`）；`tests/pane.test.tsx` 的 `marketplaceInstall` 就是這樣做的。它只拿來判斷這一份是從哪裡裝的，讀檔仍然讀真的資料夾；沒設（正式環境）時看的是真的資料夾。
 
 | 檔案 | 內容 |
 | --- | --- |
@@ -259,12 +393,15 @@ git archive --format=zip --prefix=cockpit/ -o dist/cockpit-0.5.3.zip HEAD .claud
 | `hooks/once.ts` | 同一時間只跑一件的背景工作（翻譯、整理用法、產生教學各一個） |
 | `hooks/layout.ts` | 版面：外框佔掉的行與欄、分頁、（續）、說明欄、把項目排成欄 |
 | `hooks/roadmap.ts` | 路線圖：effort 放在哪個目錄，讀它，判斷每個 effort 的階段、票的狀態與下一步；什麼時候要重讀；每一列顯示什麼 |
+| `CHANGELOG.md` | 更新紀錄：寫給同事看的每一版改了什麼。新的在最上面，每版一個二級標題且標題剛好是版本號（cockpit 靠它找條目），底下一到三條，不寫日期 |
 | `CONTEXT.md` | 用語表（effort、地圖、決策票、實作票…） |
 | `hooks/files.ts` | 面板讀寫檔案唯一的方式：路徑怎麼接（專案的檔案從專案根目錄算）、讀不到算什麼；路線圖、原文、教學、常用 prompt 共用 |
-| `hooks/remembered.ts` | 跨 session 記住的面板狀態：`$.store` 有哪些鍵、讀回來怎麼驗、開場停在哪個分頁、版本有沒有換 |
-| `hooks/release.ts` | 更新：發布的版本去哪裡看、這一份是從哪裡裝的、看完之後該做什麼、要跑哪些指令 |
+| `hooks/remembered.ts` | 跨 session 記住的面板狀態：`$.store` 有哪些鍵、讀回來怎麼驗（清單、翻譯、版本號）、開場停在哪個分頁、版本有沒有換 |
+| `hooks/release.ts` | 更新：發布的版本去哪裡看、這一份是從哪裡裝的、看完之後該做什麼、要跑哪些指令；版本號誰新誰舊、升版與退版各怎麼講（提示與標示各一組）；開場該不該檢查、該不該自己下載（退版不看「自動更新」）、該不該提示、該不該把磁碟換回發布的版本、該留著哪一種標示 |
+| `hooks/changelog.ts` | 更新紀錄：放在哪裡、格式、從裡面挑出哪幾版的條目、怎麼接進「檢查版本」的詢問、沒有這個檔時說什麼。「標題剛好是版本號」這條規則和 `scripts/publish.mjs` 各有一份，要一起改 |
 | `hooks/events.ts` | 引擎的事件對面板代表什麼：工具成功的定義、寫檔與 shell 指令各算哪一種路線圖事件 |
 | `hooks/fill.ts` | 填入輸入框的規則 |
 | `hooks/config.ts` | 分頁與面板參數（須與 `plugin.json` 的 `userConfig` 一致，有測試檢查） |
 | `types/index.d.ts` | `$.state` 的型別合約 |
 | `tests/` | 單元測試與面板測試；`fixtures/commandList.ts` 是實測的 `$.command.list()` 輸出 |
+| `scripts/publish.mjs` | 發布指令（見上方「發布」）；`publish.test.mjs` 是它的測試，用 Node 內建的測試工具跑；`remove-dir.mjs` 是兩者共用的刪資料夾 |
