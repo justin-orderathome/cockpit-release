@@ -157,12 +157,6 @@ export const refreshCommand = ({ marketplace }: Install): string[] => ['claude',
 /** 把 plugin 換成 marketplace 現在的那一版（下載到磁碟，跑著的不變） */
 export const updateCommand = ({ id }: Install): string[] => ['claude', 'plugin', 'update', id]
 
-/**
- * 更新指令失敗時的補救：裝成 marketplace 現在的那一版。只靠設定檔裝起來的那一份，Claude Code 還沒把它記成已安裝，
- * `claude plugin update` 會說 is not installed；裝一次就記下了，磁碟上也是發布的那一版。
- */
-export const installCommand = ({ id }: Install): string[] => ['claude', 'plugin', 'install', id]
-
 /** 詢問裡不答應的那個選項（答應的那個跟著升版或退版換，在 `Wording`） */
 export const UPDATE_LATER = '先不要'
 
