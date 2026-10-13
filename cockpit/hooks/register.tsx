@@ -37,6 +37,7 @@ import {
   UPDATE_LATER,
   catalogPath,
   indicatorFor,
+  installCommand,
   installedFrom,
   marketplaceDir,
   refreshCommand,
@@ -590,7 +591,10 @@ async function downloadUpdate($: EngineInterface, install: Install, quiet = fals
   }
   try {
     const ran = await $.process.run(updateCommand(install), { timeoutMs: UPDATE_TIMEOUT })
-    return ran.exitCode === 0 || failed((ran.stderr.trim() || ran.stdout.trim()).split('\n')[0] || ran.exitCode)
+    if (ran.exitCode === 0) return true
+    // 更新不成（最常見的是 Claude Code 還沒把這一份記成已安裝）：改用安裝；還是不成才算失敗，講的是更新那一次的原因
+    const installed = await $.process.run(installCommand(install), { timeoutMs: UPDATE_TIMEOUT })
+    return installed.exitCode === 0 || failed((ran.stderr.trim() || ran.stdout.trim()).split('\n')[0] || ran.exitCode)
   } catch (err) {
     return failed(reasonOf(err))
   }
