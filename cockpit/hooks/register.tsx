@@ -55,7 +55,18 @@ import type { Indicator, Install, Verdict } from './release'
 import { justReloaded, startTab, storedList, storedTranslations, storedVersion, toggled, versionChanged } from './remembered'
 import { TRACKER_DOC, roadmapWatch, touchesRoadmap, trackerRoot, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
-import { EMPTY_OVERRIDES, SAMPLE_OVERRIDES, filterSkills, groupSkills, listedCommands, parseOverrides } from './skills'
+import {
+  EMPTY_OVERRIDES,
+  NO_SOURCES,
+  SAMPLE_OVERRIDES,
+  filterSkills,
+  groupSkills,
+  listedCommands,
+  mergeSkillSources,
+  parseOverrides,
+  parseSkillLock,
+} from './skills'
+import type { SkillSources } from './skills'
 import { findSkillFile } from './source'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
@@ -109,6 +120,7 @@ const closedPromptGroups = atom({ plugin: 'cockpit', key: 'closedPromptGroups' }
 const commands = atom({ plugin: 'cockpit', key: 'commands' } as const, [] as CommandEntry[])
 const frontmatter = atom({ plugin: 'cockpit', key: 'frontmatter' } as const, [] as FrontmatterEntry[])
 const overrides = atom({ plugin: 'cockpit', key: 'overrides' } as const, EMPTY_OVERRIDES as SkillOverrides)
+const skillSources = atom({ plugin: 'cockpit', key: 'skillSources' } as const, NO_SOURCES as SkillSources)
 const openSkillGroups = atom({ plugin: 'cockpit', key: 'openSkillGroups' } as const, [] as string[])
 const search = atom({ plugin: 'cockpit', key: 'search' } as const, '')
 const translations = atom({ plugin: 'cockpit', key: 'translations' } as const, {} as Translations)
@@ -401,6 +413,13 @@ async function loadSkills($: EngineInterface) {
   const home = await homeDir($)
   const text = await files($).read(`${home}/.claude/cockpit/skills.json`)
   await update($, overrides, () => (text === undefined ? EMPTY_OVERRIDES : parseOverrides(text)))
+  // 用 npx skills 裝的 skill 從哪裡來；沒用過 npx skills 就沒有這個檔
+  const lock = await files($).read(`${home}/.agents/.skill-lock.json`)
+  // 裝在專案裡的（不加 -g）記在專案根目錄的 skills-lock.json；根目錄和找專案 skill 原文時用同一份清單
+  const projectLocks = await Promise.all(
+    (await projectDirs($)).map(async dir => parseSkillLock(await files($).read(under(dir, 'skills-lock.json')))),
+  )
+  await update($, skillSources, () => mergeSkillSources(parseSkillLock(lock), projectLocks))
   // 用法排在說明的翻譯之後才整理；兩個開關各管各的
   void (async () => {
     if (config.settings.translate) await translateSkills($)
@@ -421,7 +440,12 @@ async function translateSkills($: EngineInterface) {
   try {
     const ran = await translating.run('translate', async () =>
       translateAll(
-        listedCommands(await read($, commands), await read($, frontmatter), await read($, overrides)),
+        listedCommands(
+          await read($, commands),
+          await read($, frontmatter),
+          await read($, overrides),
+          await read($, skillSources),
+        ),
         await read($, translations),
         askModel($, 'haiku', 16000),
         async got => {
@@ -451,7 +475,12 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
         const { dirs, fs } = await skillFiles($)
         // 每個 skill 都先找原文；要不要重新整理由 makeHowtos 判斷
         const items = await howtoItems(
-          listedCommands(await read($, commands), await read($, frontmatter), await read($, overrides)),
+          listedCommands(
+            await read($, commands),
+            await read($, frontmatter),
+            await read($, overrides),
+            await read($, skillSources),
+          ),
           dirs,
           fs,
         )
@@ -1295,7 +1324,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   const { settings } = config
 
   // 這個分頁要用的狀態一次讀完
-  const [query, known, listed, fm, over, translated, pageName, openIds, isChoosing, isMakingNow] = await Promise.all([
+  const [query, known, listed, fm, over, translated, pageName, openIds, isChoosing, isMakingNow, from] = await Promise.all([
     read($, search),
     read($, howtos),
     read($, commands),
@@ -1306,6 +1335,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     read($, openSkillGroups),
     read($, howtoMenu),
     read($, makingHowtos),
+    read($, skillSources),
   ])
   const all = skillGroups(
     listed,
@@ -1314,6 +1344,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     settings.translate ? translated : NOTHING,
     // 「整理用法」關掉時當作都沒有用法：沒有「?」、進不了用法頁、搜尋也不比對；存著的用法不動
     settings.howto ? known : NOTHING,
+    from,
   )
 
   // ── 用法頁：搜尋框與列表換成一個 skill 的說明與用法 ──

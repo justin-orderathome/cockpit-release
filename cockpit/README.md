@@ -35,7 +35,7 @@ Claude Code 的右側面板 mod。上方的「狀態」框顯示用量、目前�
 | --- | --- |
 | **任務** | TodoWrite 與 TaskCreate／TaskUpdate 的任務清單。每列有耗時或剩餘時間，進行中的那一列另外畫進度條與百分比，超時時時間變紅；subagent 的清單掛在派出它的任務底下。會自動翻到最近開始的進行中任務。上方的「路線圖」列出本專案每個 effort 的階段與進度（見下方說明） |
 | **基本** | 常用 prompt，讀自 `~/.claude/cockpit/prompts.md`。點了填進輸入框，名稱結尾標 ` !` 的會直接送出。列上只顯示名稱，滑鼠移到項目上，列表下方的說明區會顯示完整內容 |
-| **SKILL** | 已安裝的 skill，依 plugin 分組，另有「我的 skill」「內建 skill」兩組；頂端有搜尋框。點了把 `/<skill 名稱> ` 填進輸入框。一組裡的 skill 名稱橫向排成等寬的幾欄，欄數隨面板寬度變（1–5 欄，每欄至少 18 格），由上到下排滿一欄再換右邊一欄，比一欄還寬的名稱多佔一欄（可在 [設定] 改回一個一行）；滑鼠移到名稱上，列表下方的說明區會顯示完整說明。說明會自動翻成繁體中文。cockpit 還會讀每個 skill 的 SKILL.md，整理成四項用法（何時用、怎麼叫、會做什麼、搭配）：有用法的 skill 名稱後面多一個 `?`，點了把列表換成用法頁，上面是說明與用法的全文，可以直接填入或返回（見下方說明）。用法頁上還可以按「教學」，讓 cockpit 把這個 skill 寫成一份詳細的繁體中文教學，在編輯器裡打開（見下方說明） |
+| **SKILL** | 已安裝的 skill，依 plugin 分組；用 `npx skills add` 裝的依來源（`owner/repo`）分組，另有「我的 skill」「內建 skill」兩組（見下方說明）；頂端有搜尋框。點了把 `/<skill 名稱> ` 填進輸入框。一組裡的 skill 名稱橫向排成等寬的幾欄，欄數隨面板寬度變（1–5 欄，每欄至少 18 格），由上到下排滿一欄再換右邊一欄，比一欄還寬的名稱多佔一欄（可在 [設定] 改回一個一行）；滑鼠移到名稱上，列表下方的說明區會顯示完整說明。說明會自動翻成繁體中文。cockpit 還會讀每個 skill 的 SKILL.md，整理成四項用法（何時用、怎麼叫、會做什麼、搭配）：有用法的 skill 名稱後面多一個 `?`，點了把列表換成用法頁，上面是說明與用法的全文，可以直接填入或返回（見下方說明）。用法頁上還可以按「教學」，讓 cockpit 把這個 skill 寫成一份詳細的繁體中文教學，在編輯器裡打開（見下方說明） |
 | **設定** | 強調色、用量門檻、自動開啟等參數 |
 
 放不下時，下方會自己分頁，翻頁鍵嵌在下框線的右端（`k: 上頁  2/5  j: 下頁`），上方的「狀態」框會一直留在畫面上。面板太窄、分頁列放不上框線時，分頁列會退回框上方的一行。
@@ -54,6 +54,8 @@ Claude Code 的右側面板 mod。上方的「狀態」框顯示用量、目前�
 開頭有 `Type:`（research／prototype／grilling／task）的是決策票，其餘是實作票。實作票的 `Status:` 是 `resolved`、`done`、`wontfix`，或驗收清單全部打勾，就算結案。`Status:` 是 `ready-for-human` 的票標成「待人處理」，「繼續」會跳過它，只剩這種票時不填任何東西。agent 用 Write／Edit 改了 `.scratch/` 底下的檔案會自動重讀；用 Bash／PowerShell 改的，指令跑完後比對檔名、大小與修改時間，有變才重讀。自己在編輯器改的，按 `r` 重新讀取。
 
 **effort 放在哪**：照專案的 `docs/agents/issue-tracker.md`（寫票的 skill 也看這份），取裡面第一個 `<目錄>/<effort>/` 這種路徑的目錄，例如寫 `docs/efforts/<effort>/map.md` 就讀 `docs/efforts/`。沒有這份文件或認不出路徑時讀 `.scratch/`；文件標題寫明是 GitHub、GitLab、Linear、Jira 這類線上的 tracker 時不顯示路線圖。目錄一律從專案根目錄找，shell `cd` 到別處不影響。
+
+**用 `npx skills` 裝的 skill**（[SKILL]）：`npx skills add <owner/repo> -g` 把 skill 一個一個放進 `~/.claude/skills/`，Claude Code 看到的是一個個個人 skill，不知道它們是同一包。cockpit 讀 `npx skills` 記下的 `~/.agents/.skill-lock.json`，把查得到來源的 skill 依來源分組，例如 `emilkowalski/skills` 一組；只有一個 skill 的來源也自成一組。來源組和 plugin 組一起照字母排，組名可以在「SKILL 覆寫」改短。查不到來源的（自己寫的、claude.ai 同步的、其他工具裝的）留在「我的 skill」；沒有這個檔或讀不懂時，全部照舊在「我的 skill」。比對只看 skill 名稱，lock 檔跟著 skill 清單一起重讀（裝了新的 skill 後 `/reload-plugins` 或重開）。裝在專案裡的（不加 `-g`）也一樣分組：來源記在專案根目錄的 `skills-lock.json`，cockpit 一併讀進來；同一個 skill 全域和專案裡都有記錄時，照全域的來源，因為同名時生效的是使用者層那一份。
 
 **填入輸入框的規則**（[基本] 與 [SKILL] 共用）：輸入框是空的就直接填；已經有字時，slash command 會放在最前面，原本的字變成它的參數，一般 prompt 則換一行接在後面。
 
@@ -137,19 +139,29 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 
 ### SKILL 覆寫：`~/.claude/cockpit/skills.json`
 
+在 [設定] 按「編輯 SKILL 覆寫」（`e`）用 VS Code 打開；檔案還不存在時會先建立一份範例，開頭的 `說明` 列了四個鍵的用法與寫法範例（JSON 不能寫註解，所以放在一個 cockpit 不讀的鍵裡，不需要可以整段刪掉）。存檔後切到別的分頁再切回 [SKILL] 就生效。
+
 ```json
 {
   "groups": { "mattpocock-skills": "mattpocock" },
   "descriptions": { "mattpocock-skills:wayfinder": "大型工作的地圖" },
-  "hidden": ["mattpocock-skills:teach", "builtin-skills"]
+  "hidden": ["mattpocock-skills:teach", "builtin-skills"],
+  "move": { "gitnexus-*": "gitnexus", "mattpocock-skills:grilling": "my-skills" }
 }
 ```
 
 | 欄位 | 用途 |
 | --- | --- |
-| `groups` | 組名改成較短的名稱：plugin 名稱 → 顯示的組名 |
+| `groups` | 組名改成較短的名稱：組的 id（plugin 名稱、來源的 `owner/repo` 或 `move` 開的自訂組）→ 顯示的組名 |
 | `descriptions` | 自訂短說明，優先於自動翻譯：skill 完整名稱 → 說明 |
-| `hidden` | 要隱藏的 skill（完整名稱）或整組。組的 id 是 plugin 名稱，另外兩組是 `my-skills`、`builtin-skills` |
+| `hidden` | 要隱藏的 skill（完整名稱）或整組。組的 id 是 plugin 名稱、來源的 `owner/repo` 或自訂組的 id，另外兩組是 `my-skills`、`builtin-skills` |
+| `move` | 把 skill 移到指定的組：skill 完整名稱 → 組的 id。列在 [SKILL] 裡的 skill 都能移（個人的、來源組的、plugin 的、內建的），蓋過預設的分組。名稱結尾可以加一個 `*` 比對前綴（`gitnexus-*`；只寫 `"*"` 就是所有 skill），同時符合時完整名稱優先，符合多個前綴時取最長的。組的 id 和現有的組同名就併進那一組，否則開一個自訂組，和 plugin 組一起照字母排，一樣能用 `groups` 改名、用 `hidden` 藏掉。找不到的 skill 安靜略過 |
+
+`move` 的幾個細節：
+
+- `move` 比整組的 `hidden` 優先：從藏掉的組移出來的 skill，會出現在新的組裡；但 `hidden` 裡單獨列名的 skill，移到哪組都照樣藏著。
+- 只有 skill 能移：`/clear` 這類內建指令本來就不列在 [SKILL]，寫進 `move` 也不會有作用。
+- plugin skill 移到別組後，顯示的名稱照舊省略前綴，所以可能和那組裡另一個同名的 skill 看起來一模一樣；插入輸入框的還是完整名稱，不會選錯。
 
 ### 面板參數
 

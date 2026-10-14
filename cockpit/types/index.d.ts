@@ -139,7 +139,7 @@ export type Howto = {
 }
 
 export type SkillGroup = {
-  /** plugin 名稱，或 'my-skills'、'builtin-skills' */
+  /** plugin 名稱、來源的 `owner/repo`，或 'my-skills'、'builtin-skills' */
   id: string
   title: string
   items: SkillItem[]
@@ -150,6 +150,8 @@ export type SkillOverrides = {
   groups: Record<string, string>
   descriptions: Record<string, string>
   hidden: string[]
+  /** 手動指定 skill 放哪一組：完整名稱或結尾 `*` 的前綴 → 組的 id */
+  move: Record<string, string>
 }
 
 /** $.command.list() 的一筆，只取用得到的欄位 */
@@ -188,6 +190,8 @@ declare module 'claude-code' {
       commands: CommandEntry[]
       frontmatter: FrontmatterEntry[]
       overrides: SkillOverrides
+      /** 用 `npx skills add -g` 裝的 skill 的來源：skill 名稱 → `owner/repo`（取自 `~/.agents/.skill-lock.json`） */
+      skillSources: Record<string, string>
       /** 展開的 [SKILL] 組 id（預設收合） */
       openSkillGroups: string[]
       search: string
