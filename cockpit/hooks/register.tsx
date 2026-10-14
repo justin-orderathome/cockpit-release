@@ -1742,14 +1742,30 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             ),
           }
   const switchWidth = keysWidth([{ hotkey: 'o', label: isSwitching ? '完成' : '開關' }]) - 2
+  // 覆寫檔（skills.json）管的是這個分頁怎麼分組與顯示，按鈕放在這裡；檔案還不存在時先建立範例
+  const editOverrides = (
+    <Button
+      key="edit-overrides"
+      label="編輯覆寫"
+      plain
+      hotkey="e"
+      onPress={() =>
+        void (async () => {
+          await openInEditor($, `${await homeDir($)}/.claude/cockpit/skills.json`, SAMPLE_OVERRIDES)
+        })()
+      }
+    />
+  )
+  const editWidth = keysWidth([{ hotkey: 'e', label: '編輯覆寫' }]) - 2
   const actions = (
     <Box key="skill-actions" flexDirection="row" gap={2}>
       {switchButton}
       {howtoAction?.el}
+      {editOverrides}
     </Box>
   )
   // 頭尾各留一格（`keysWidth` 的算法）
-  const actionsWidth = 2 + switchWidth + (howtoAction === undefined ? 0 : 2 + howtoAction.width)
+  const actionsWidth = 2 + switchWidth + (howtoAction === undefined ? 0 : 2 + howtoAction.width) + 2 + editWidth
 
   // plugin 的 skill 沒有單獨的開關，看它的 plugin 有沒有停用（move 混進一般組的也是）；其他的照 skillOverrides 算開或關
   const plugins = pluginSkills(listed)
@@ -2070,11 +2086,6 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
   const Select = 'Select' in ui ? ui.Select : undefined
   const changed = new Set(changedFields(config.raw))
 
-  const editOverrides = () =>
-    void (async () => {
-      await openInEditor($, `${await homeDir($)}/.claude/cockpit/skills.json`, SAMPLE_OVERRIDES)
-    })()
-
   const rows: Row<JSX.Element>[] = []
   for (const name of [...new Set(FIELDS.map(f => f.group))]) {
     const group = { id: name, label: name }
@@ -2082,18 +2093,7 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
       id: `set-group-${name}`,
       group,
       isHeader: true,
-      // 覆寫檔管的是整個 SKILL 分頁，按鈕放在 SKILL 組名的右端，不排成像一個選項
-      value:
-        name === 'SKILL' ? (
-          <Box flexDirection="row" gap={1}>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text dimColor>{name}</Text>
-            </Box>
-            <Button key="edit-overrides" label="編輯覆寫" plain dimColor hotkey="e" onPress={editOverrides} />
-          </Box>
-        ) : (
-          <Text dimColor>{name}</Text>
-        ),
+      value: <Text dimColor>{name}</Text>,
     })
     for (const f of FIELDS.filter(x => x.group === name)) {
       // 還是預設值的標籤變暗，改過的維持一般色、值後面多一個「•」，看得出改過哪些

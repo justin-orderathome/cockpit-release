@@ -285,7 +285,7 @@ export function mergeSkillSources(globalSources: SkillSources, projects: readonl
 }
 
 /**
- * `[ 編輯 SKILL 覆寫 ]` 找不到檔案時建立的範例。JSON 不能寫註解，說明放在 `說明` 這個鍵：
+ * [SKILL] 的「編輯覆寫」 找不到檔案時建立的範例。JSON 不能寫註解，說明放在 `說明` 這個鍵：
  * `parseOverrides` 只讀認得的鍵，其餘的不理。
  */
 export const SAMPLE_OVERRIDES = `{
