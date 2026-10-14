@@ -63,125 +63,21 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 
 ## 安裝
 
-需要 Windows、Claude Code 2.1.294 以上（用 `claude --version` 確認）與 `git`。cockpit 從公開的發布 repo `justin-orderathome/cockpit-release` 安裝，第一次安裝與從舊的資料夾搬過來都用同一種做法。
+需要 Windows、Claude Code 2.1.294 以上（用 `claude --version` 確認）與 `git`（用 `git --version` 確認；沒有的話在 PowerShell 執行 `winget install Git.Git`，裝好後重開 PowerShell）。cockpit 從公開的發布 repo `justin-orderathome/cockpit-release` 安裝。
 
-### 貼一段文字給 Claude Code
-
-開 Claude Code，把下面整段貼進去送出。它會先確認這台機器裝得起來，再備份並修改設定檔、把原本的設定與快取帶過來、刪掉舊的 cockpit 資料夾，最後列出改了什麼。照它最後說的，把所有 Claude Code 關掉再開，就會自己裝起來。
-
-```text
-請幫我在這台 Windows 電腦上安裝 cockpit（Claude Code 的右側面板）。原本是用資料夾載入的話，一併搬到新的安裝方式。照下面七步依序做，每一步的「確認」成立才做下一步。
-
-每一步只有三種結果：
-- 完成：「確認」成立，做下一步。
-- 略過：這一步要處理的東西本來就不存在（例如沒有舊資料夾）。記下略過與原因，做下一步。
-- 停下來：指令失敗、檔案讀不懂，或「確認」不成立。後面的步驟都不做，告訴我停在第幾步、看到的完整訊息、到目前為止改了哪些檔，以及最後「退路」那一段。
-
-「設定檔」指 %USERPROFILE%\.claude\settings.json。只改下面寫到的鍵，其餘內容與排版原樣保留：用編輯檔案的工具改那幾行，不用 PowerShell 把整份 JSON 讀進來再寫回去（會弄亂排版與中文）。
-
-第 1 步　確認這台機器裝得起來（只查，不改任何東西）
-  執行 git --version
-    找不到 git：停下來。請我先裝 Git for Windows（在 PowerShell 執行 winget install Git.Git），裝好後把 Claude Code 全部關掉再開，把這段文字重貼一次。
-  執行 git ls-remote https://github.com/justin-orderathome/cockpit-release.git
-    失敗：停下來。把完整的錯誤訊息給我，請我轉給 Justin。
-  確認：兩個指令都成功，第二個至少印出一行 commit。
-
-第 2 步　備份設定檔
-  把設定檔複製成同一個資料夾裡的 settings.backup-cockpit-<年月日-時分秒>.json。
-  設定檔不存在：略過（第 3 步會建立一份新的）。
-  確認：備份檔存在，大小與設定檔相同。記下備份檔的完整路徑。
-
-第 3 步　改設定檔的三處
-  (a) env 裡的 CLAUDE_CODE_PLUGIN_DIRS
-      它的值是用 ; 隔開的一個或多個資料夾。逐一讀 <資料夾>\.claude-plugin\plugin.json，name 是 cockpit 的那一個就是「舊資料夾」：記下它的完整路徑，把它從值裡拿掉，其餘的資料夾照原樣留著。值裡只有它一個時，把 CLAUDE_CODE_PLUGIN_DIRS 這一行整個拿掉。
-      沒有這個鍵，或沒有任何一個資料夾符合：略過，並記下「沒有舊資料夾」。路徑裡有 cockpit 字樣卻不符合的，原樣留著，最後告訴我。
-  (b) extraKnownMarketplaces 裡的 orderathome，內容是：
-          "orderathome": {
-            "source": { "source": "github", "repo": "justin-orderathome/cockpit-release" }
-          }
-      extraKnownMarketplaces 已經存在時，把這一筆加進現有的那一段。orderathome 這一筆已經存在時，把它改成和上面一樣；裡面有 "autoUpdate" 就把那一行拿掉。
-  (c) enabledPlugins 裡加上 "cockpit@orderathome": true
-      enabledPlugins 已經存在時，把這一筆加進現有的那一段。
-  確認：設定檔解析得過（是合法的 JSON）；extraKnownMarketplaces 與 enabledPlugins 在最外層各只出現一次；重讀檔案，(a)(b)(c) 的值都和上面寫的一樣；和備份比，只有這三處不同。
-  解析不過：把備份複製回設定檔，然後停下來。
-
-第 4 步　把原本在 [設定] 改過的值帶過來
-  把設定檔裡 pluginConfigs["cockpit@inline"] 的內容原樣複製一份，放在 pluginConfigs["cockpit@orderathome"]。原本那一筆留著。
-  沒有 pluginConfigs["cockpit@inline"]，或 pluginConfigs["cockpit@orderathome"] 已經存在：略過，已經存在的那一筆不動。
-  確認：設定檔解析得過，兩筆的內容相同。
-
-第 5 步　把翻譯與用法的快取帶過來
-  來源：%USERPROFILE%\.claude\plugins\store\cockpit_inline-e1f824f0cbe5.json
-  目的：%USERPROFILE%\.claude\plugins\store\cockpit_orderathome-7aade36bdd60.json
-  把來源複製成目的。來源留著。
-  來源不存在，或目的已經存在：略過，已經存在的目的檔不動。
-  確認：目的檔存在，大小與來源相同。
-
-第 6 步　刪掉舊資料夾
-  第 3 步記下「沒有舊資料夾」：略過。
-  舊資料夾裡有 .git（它是 git 的工作目錄，裡面可能有還沒推上去的東西）：不刪，留著，最後告訴我它的路徑與「是 git 的工作目錄所以沒刪」。
-  刪之前重讀一次 <舊資料夾>\.claude-plugin\plugin.json：檔案存在而且 name 是 cockpit 才把整個舊資料夾刪掉。不是的話留著，最後告訴我它的路徑與沒刪的原因。
-  刪不掉（檔案被占用）：留著，最後請我把 Claude Code 全部關掉之後自己刪，然後照常做第 7 步。
-  確認：舊資料夾已經不存在，或已記下留著的原因。
-
-第 7 步　告訴我改了什麼
-  先查系統層級的環境變數（只查不改），在 PowerShell 執行：
-    [Environment]::GetEnvironmentVariable('CLAUDE_CODE_PLUGIN_DIRS','User')
-    [Environment]::GetEnvironmentVariable('CLAUDE_CODE_PLUGIN_DIRS','Machine')
-  有值的話在清單裡寫出來，並提醒我：裡面如果有舊的 cockpit 資料夾要自己拿掉，不拿掉的話跑的仍是舊的那一份，而且不會有任何提示。
-  然後列一份清單，七步每一步各一行，寫完成、略過（原因）或沒做（原因），並包含：
-    - 備份檔的完整路徑
-    - 設定檔裡每一個改過的鍵，改之前與改之後的值
-    - 快取檔有沒有複製
-    - 舊資料夾的路徑，刪了還是留著
-  最後請我做這件事：把所有 Claude Code 視窗關掉再開。第一次開啟會自己下載安裝，大約一分鐘內右側出現面板；切到 [設定] 捲到最下面，看得到 cockpit 與版本號就是裝好了。面板沒有自己出現時打 /cockpit。
-
-退路（任何一步停下來，或重開之後面板不正常時告訴我）
-  把第 2 步的備份檔複製回 %USERPROFILE%\.claude\settings.json（第 2 步略過的話，把第 3 步新建的設定檔刪掉），再向 Justin 要一份 cockpit 的 zip。
-```
-
-### 手動的步驟（備案）
-
-不想讓 Claude Code 替你改設定檔時照這裡做。先確認裝得起來：在 PowerShell 執行 `git --version` 與 `git ls-remote https://github.com/justin-orderathome/cockpit-release.git`，兩個都要成功；沒有 `git` 就先執行 `winget install Git.Git`。
-
-1. 關掉所有 Claude Code，備份設定檔：
+1. 在 PowerShell 執行：
 
    ```powershell
-   Copy-Item $HOME\.claude\settings.json $HOME\.claude\settings.backup-cockpit.json
+   claude plugin marketplace add justin-orderathome/cockpit-release
+   claude plugin install cockpit@orderathome
    ```
 
-2. 用記事本開 `%USERPROFILE%\.claude\settings.json`，改三處：
+   第一行把發布 repo 加成名為 `orderathome` 的 marketplace，第二行從它安裝 cockpit。
+2. 把所有 Claude Code 視窗關掉再開。右側會出現面板；切到 [設定] 捲到最下面，看得到 `cockpit` 與版本號就是裝好了。面板沒有自己出現時打 `/cockpit`。
 
-   - **拿掉舊的資料夾**：`"env"` 裡有 `"CLAUDE_CODE_PLUGIN_DIRS"` 的話，把 cockpit 的那一個資料夾從值裡拿掉（多個資料夾用 `;` 隔開）；只有它一個就整行刪掉。不拿掉的話跑的還是舊的那一份，而且沒有任何提示。
-   - **加上 marketplace**：在最外層的 `{ }` 裡加上 `extraKnownMarketplaces` 的 `orderathome`。
-   - **啟用**：在 `enabledPlugins` 加上 `"cockpit@orderathome": true`。
+第一行失敗時，先執行 `git ls-remote https://github.com/justin-orderathome/cockpit-release.git` 確認連得到發布 repo，把完整的錯誤訊息轉給作者。
 
-   ```json
-   "extraKnownMarketplaces": {
-     "orderathome": {
-       "source": { "source": "github", "repo": "justin-orderathome/cockpit-release" }
-     }
-   },
-   "enabledPlugins": {
-     "cockpit@orderathome": true
-   }
-   ```
-
-   原本就有 `extraKnownMarketplaces` 或 `enabledPlugins` 時，把裡面那一筆加進現有的段落，不要重複開一段。
-
-3. 原本用資料夾載入、想把設定與快取帶過來的話（不做也能用，只是 [設定] 回到預設值，翻譯與用法會重新整理一輪）：
-
-   - 設定：把設定檔裡 `pluginConfigs` 的 `"cockpit@inline"` 那一筆複製一份，鍵改成 `"cockpit@orderathome"`。
-   - 快取：`cockpit_orderathome-7aade36bdd60.json` 還不存在時才複製。
-
-     ```powershell
-     Copy-Item $HOME\.claude\plugins\store\cockpit_inline-e1f824f0cbe5.json $HOME\.claude\plugins\store\cockpit_orderathome-7aade36bdd60.json
-     ```
-
-4. 存檔，開 Claude Code。第一次開啟會自己下載安裝，大約一分鐘內右側出現面板；[設定] 最下面看得到 `cockpit` 與版本號就是裝好了。面板沒有自己出現的話打 `/cockpit`。
-5. 確認面板正常之後，把舊的 cockpit 資料夾刪掉。它如果是用 git clone 下來的（裡面有 `.git`），先確認沒有還沒推上去的東西，或乾脆留著。
-
-**出事時的退路**：把設定檔的備份複製回 `%USERPROFILE%\.claude\settings.json`，再向作者要一份 zip。
+**移除**：`claude plugin uninstall cockpit@orderathome`，要連 marketplace 一起拿掉再加 `claude plugin marketplace remove orderathome`。
 
 **之後的更新**不必重裝，見下面的「更新」一節。你的設定、常用 prompt 與 SKILL 覆寫都存在別的地方（`settings.json` 與 `~/.claude/cockpit/`），換版不會被蓋掉。
 
