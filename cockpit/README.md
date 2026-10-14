@@ -307,7 +307,7 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 
 型別檢查用的 `tsconfig.json`，延伸的是 `.claude-plugin/types/` 裡的型別設定。那個資料夾由 Claude Code 在載入 mod 時自動產生（已加進 `.gitignore`），所以要先載入過一次才能做型別檢查。
 
-面板測試裡的 cockpit 是從資料夾載入的，測試工具也沒有辦法指定 plugin 的資料夾。要測「從 marketplace 安裝」才有的行為（開場檢查、標示、「檢查版本」的詢問），就在測試的環境變數裡設 `COCKPIT_TEST_PLUGIN_ROOT`，值是假裝的安裝資料夾（`…/plugins/cache/<marketplace>/<plugin>/<版本>`）；`tests/pane.test.tsx` 的 `marketplaceInstall` 就是這樣做的。它只拿來判斷這一份是從哪裡裝的，讀檔仍然讀真的資料夾；沒設（正式環境）時看的是真的資料夾。
+面板測試裡的 cockpit 是從資料夾載入的，測試工具也沒有辦法指定 plugin 的資料夾。更新的規則在 `tests/updater.test.ts` 直接測，不必經過面板；面板測試只驗「從 marketplace 安裝」時標示與按鈕的接線，這時在測試的環境變數裡設 `COCKPIT_TEST_PLUGIN_ROOT`，值是假裝的安裝資料夾（`…/plugins/cache/<marketplace>/<plugin>/<版本>`）；`tests/pane.test.tsx` 的 `marketplaceInstall` 就是這樣做的。它只拿來判斷這一份是從哪裡裝的，讀檔仍然讀真的資料夾；沒設（正式環境）時看的是真的資料夾。
 
 | 檔案 | 內容 |
 | --- | --- |
@@ -317,7 +317,7 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `hooks/usage.ts` | 用量（含「狀態」框的行數與配色）與 toast 判斷 |
 | `hooks/prompts.ts` | `prompts.md` 解析 |
 | `hooks/skills.ts` | SKILL 分組、分類、搜尋與覆寫檔；這一次顯示哪幾組、分類標題列畫在哪、頂端佔幾行 |
-| `hooks/switches.ts` | SKILL 的開關：哪些 skill 關著、組與分類的開／關／部分與 token 合計、按組或分類時改哪些、`settings.local.json` 怎麼改、分類標題列、分頁籤與開關按鈕的字、行尾留的寬度、按完的提示；停用整個 plugin：哪一組是 plugin 組（與分類裡有幾個）、`enabledPlugins` 的鍵、停用的 plugin 照樣列出的組 |
+| `hooks/switches.ts` | SKILL 的開關：哪些 skill 關著、組與分類的開／關／部分與 token 合計、按組或分類時改哪些、`settings.local.json` 怎麼改、分類標題列、分頁籤與開關按鈕的字、按完的提示；`switchboard` 一次給出畫面上每個 skill、組、分類的狀態與按下去做什麼，`planSwitch` 決定按下去之後寫什麼、要不要代跑重載；停用整個 plugin：哪一組是 plugin 組（與分類裡有幾個）、`enabledPlugins` 的鍵、停用的 plugin 照樣列出的組 |
 | `hooks/translate.ts` | SKILL 說明的翻譯流程與快取 |
 | `hooks/source.ts` | 找一個 skill 的原文（SKILL.md）：各種來源的定位規則 |
 | `hooks/howto.ts` | SKILL 用法的整理流程、快取與失效（程式裡用法叫 howto，`usage` 是用量） |
@@ -326,12 +326,13 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `hooks/tutorial.ts` | SKILL 教學從讀原料到存檔的整個流程：狀態（沒得產／還沒有／最新／舊的）、產生、教學檔的開頭資訊 |
 | `hooks/ask.ts` | 問模型一次的方式與回覆的形狀；翻譯、用法、教學共用 |
 | `hooks/once.ts` | 同一時間只跑一件的背景工作（翻譯、整理用法、產生教學各一個） |
-| `hooks/layout.ts` | 版面：外框佔掉的行與欄、分頁、（續）、說明欄、把項目排成欄 |
+| `hooks/layout.ts` | 版面：外框佔掉的行與欄、分頁、（續）、說明欄、把項目排成欄；按鈕與文字畫出來多寬（下框線上的一排用 `footWidth`、行尾用 `tailWidth`） |
 | `hooks/roadmap.ts` | 路線圖：effort 放在哪個目錄，讀它，判斷每個 effort 的階段、票的狀態與下一步；什麼時候要重讀；每一列顯示什麼 |
 | `CHANGELOG.md` | 更新紀錄：寫給同事看的每一版改了什麼。新的在最上面，每版一個二級標題且標題剛好是版本號（cockpit 靠它找條目），底下一到三條，不寫日期 |
 | `CONTEXT.md` | 用語表（effort、地圖、決策票、實作票…） |
 | `hooks/files.ts` | 面板讀寫檔案唯一的方式：路徑怎麼接（專案的檔案從專案根目錄算）、讀不到算什麼；路線圖、原文、教學、常用 prompt 共用 |
 | `hooks/remembered.ts` | 跨 session 記住的面板狀態：`$.store` 有哪些鍵、讀回來怎麼驗（清單、翻譯、版本號、[SKILL] 選的分類）、開場停在哪個分頁、版本有沒有換 |
+| `hooks/updater.ts` | 更新的整個流程：開場讀回記著的版本並講換了哪一版、開場的檢查與背景下載、「檢查版本」的詢問、重新載入 mod；更新用的 `$.store` 鍵只有它讀寫。引擎的操作由 `register.tsx` 給，`tests/updater.test.ts` 用記憶體裡的假東西直接測 |
 | `hooks/release.ts` | 更新：發布的版本去哪裡看、這一份是從哪裡裝的、看完之後該做什麼、要跑哪些指令；版本號誰新誰舊、升版與退版各怎麼講（提示與標示各一組）；開場該不該檢查、該不該自己下載（退版不看「自動更新」）、該不該提示、該不該把磁碟換回發布的版本、該留著哪一種標示 |
 | `hooks/changelog.ts` | 更新紀錄：放在哪裡、格式、從裡面挑出哪幾版的條目、怎麼接進「檢查版本」的詢問、沒有這個檔時說什麼。「標題剛好是版本號」這條規則和 `scripts/publish.mjs` 各有一份，要一起改 |
 | `hooks/events.ts` | 引擎的事件對面板代表什麼：工具成功的定義、寫檔與 shell 指令各算哪一種路線圖事件 |

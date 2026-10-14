@@ -25,11 +25,11 @@ export type TabContent = {
   bottom?: JSX.Element
   /** 這個分頁的操作按鈕：疊在下框線的左端（和右端的翻頁鍵同一條），放不下時退回框內的最後一行 */
   actions?: JSX.Element
-  /** `actions` 畫出來多寬（`keysWidth` 算） */
+  /** `actions` 畫出來多寬（`footWidth` 算） */
   actionsWidth?: number
   /** 這個分頁的狀態（例如 [設定] 的版本）：疊在下框線的右端；要翻頁（翻頁鍵在那裡）或放不下時退回框內的最後一行 */
   status?: JSX.Element
-  /** `status` 畫出來多寬，頭尾各一格算在內 */
+  /** `status` 畫出來多寬（`footWidth` 算） */
   statusWidth?: number
   rows: Row<JSX.Element>[]
   /** 一行都沒有時顯示的話 */

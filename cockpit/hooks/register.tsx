@@ -7,7 +7,6 @@ import type {
   EffortLevel,
   FrontmatterEntry,
   PromptGroup,
-  SkillGroup,
   SkillItem,
   SkillOverrides,
   Tab,
@@ -15,7 +14,7 @@ import type {
   Ticket,
   UsageSnapshot,
 } from '../types'
-import { NO_CHANGELOG, changelogBeside, changelogIn, notesBetween, withNotes } from './changelog'
+import { NO_CHANGELOG, changelogIn } from './changelog'
 import { FIELDS, TABS, changedFields, parseSettings, rawValues, resetLabel } from './config'
 import type { Field, Settings } from './config'
 import type { Ask } from './ask'
@@ -26,94 +25,42 @@ import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
 import { viewHowtoPage } from './howtoPage'
-import { ROW_GAP, chrome, fitText, foldLabel, footPlan, gridRows, gridSlots, keysWidth, layout, tabBar as tabBarOf, textWidth } from './layout'
+import { ROW_GAP, chrome, fitText, foldLabel, footPlan, footWidth, gridRows, gridSlots, layout, tabBar as tabBarOf, tailWidth, textWidth } from './layout'
 import type { Row } from './layout'
 import { singleJob } from './once'
 import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
-import {
-  INDICATOR_MARK,
-  RELEASE_MANIFEST,
-  STARTUP_CHECK_DELAY,
-  SWITCH_NOW,
-  UPDATE_LATER,
-  catalogPath,
-  indicatorFor,
-  installCommand,
-  installedFrom,
-  marketplaceDir,
-  refreshCommand,
-  releasedManifest,
-  shouldCheck,
-  shouldDownload,
-  shouldNotify,
-  shouldRestore,
-  updateCommand,
-  verdict,
-  versionIn,
-  wordingFor,
-} from './release'
-import type { Indicator, Install, Verdict } from './release'
-import {
-  justReloaded,
-  startTab,
-  storedCategory,
-  storedList,
-  storedTranslations,
-  storedVersion,
-  toggled,
-  versionChanged,
-} from './remembered'
+import { INDICATOR_MARK, STARTUP_CHECK_DELAY, SWITCH_NOW, indicatorFor, installedFrom, versionIn } from './release'
+import type { Indicator, Install } from './release'
+import { startTab, storedList, storedText, storedTranslations, toggled } from './remembered'
 import { TRACKER_DOC, roadmapWatch, touchesRoadmap, trackerRoot, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
 import {
   EMPTY_OVERRIDES,
   NO_SOURCES,
   SAMPLE_OVERRIDES,
-  categorize,
-  groupSkills,
-  listedCommands,
+  catalogCache,
   mergeSkillSources,
   parseOverrides,
   parseSkillLock,
   skillView,
 } from './skills'
-import type { SkillSources } from './skills'
+import type { SkillCatalog, SkillSources } from './skills'
 import { findSkillFile } from './source'
 import {
-  GROUP_STATE_TAIL,
-  GROUP_SWITCH_TAIL,
   IGNORED_NOTICE,
   INSTALLED_PLUGINS,
   LOCAL_SETTINGS,
-  PLUGIN_SWITCH_TAIL,
-  SWITCH_TAIL,
-  TOKENS_TAIL,
-  UNREADABLE_SETTINGS,
   categoryTitle,
-  disabledPlugins,
-  flipAll,
-  groupPlugin,
   installedPlugins,
-  isPluginOff,
-  isSkillOff,
-  pluginGroupCount,
-  pluginKey,
-  pluginSkills,
-  pluginToast,
+  planSwitch,
   readEnabledPlugins,
   readOverrides,
-  rewriteSettings,
-  skillPlugins,
-  skillTokens,
   stateLabel,
-  summarize,
-  switchToast,
+  switchboard,
   tabLabel,
-  tokensOf,
-  withDisabledPlugins,
   withIgnoreLine,
 } from './switches'
-import type { SwitchAction, SwitchSummary } from './switches'
+import type { Press, SwitchState } from './switches'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
 import type { Elements, TabContent, TabContext } from './tab'
@@ -121,6 +68,8 @@ import { EMPTY_BOARD, applyTask, formatDuration, hasRunning, taskCells, taskColu
 import type { TaskEvent, TaskView } from './tasks'
 import { translateAll } from './translate'
 import type { Translations } from './translate'
+import { makeUpdater } from './updater'
+import type { Updater, UpdaterPorts } from './updater'
 import { USAGE_HINT, checkAlerts, chipArea, chipColor, chipParts, shortTokens } from './usage'
 
 /**
@@ -407,20 +356,37 @@ async function shownIndicator($: EngineInterface): Promise<Indicator | undefined
   return indicatorFor({ install: await installOf($), current: await readVersion($), released, downloaded })
 }
 
-// 記著的兩個版本各寫兩處：`$.store`（給下次開場）與 atom（讓面板上的標示跟著換）。
-// atom 一樣的不必再寫（寫了就重畫）；`update` 的對象要寫明是哪個 atom，所以兩份各寫一個函式
+/** 更新用的 `claude plugin …` 指令最多等多久（毫秒）：要連 GitHub，比引擎預設的 30 秒寬 */
+const UPDATE_TIMEOUT = 120_000
 
-/** 記下這次查到的發布版本。 */
-async function rememberReleased($: EngineInterface, version: string) {
-  await $.store.set('releasedVersion', version)
-  if ((await read($, releasedVersion)) !== version) await update($, releasedVersion, () => version)
+/**
+ * 更新的流程（`updater.ts`）要用的引擎操作。記著的兩個版本放上畫面時，atom 一樣的不必再寫（寫了就重畫）。
+ */
+function updaterPorts($: EngineInterface): UpdaterPorts {
+  return {
+    run: argv => $.process.run(argv, { timeoutMs: UPDATE_TIMEOUT }),
+    fetch: url => $.http.fetch(url),
+    files: files($),
+    store: { get: key => $.store.get(key), set: (key, value) => $.store.set(key, value) },
+    now: () => $.clock.now(),
+    home: () => homeDir($),
+    toast: text => $.ui.toast(text),
+    ask: (question, options) => $.ui.ask(question, options),
+    reloadPlugins: async () => (await $.command.run({ command: 'reload-plugins' })).text,
+    show: async ({ released, downloaded }) => {
+      if ((await read($, releasedVersion)) !== released) await update($, releasedVersion, () => released)
+      if ((await read($, downloadedVersion)) !== downloaded) await update($, downloadedVersion, () => downloaded)
+    },
+  }
 }
 
-/** 記下已經下載、還沒換上的是哪一版（`null` 是沒有）。 */
-async function rememberDownloaded($: EngineInterface, version: string | null) {
-  await $.store.set('downloadedVersion', version)
-  if ((await read($, downloadedVersion)) !== (version ?? '')) await update($, downloadedVersion, () => version ?? '')
-}
+/** 這一份 cockpit 的更新流程：開場、檢查版本、重新載入 mod 都從這裡走 */
+const updaterOf = async ($: EngineInterface): Promise<Updater> =>
+  makeUpdater(updaterPorts($), {
+    current: await readVersion($),
+    install: await installOf($),
+    autoUpdate: config.settings.autoUpdate,
+  })
 
 /**
  * 用 VS Code 開檔；檔案不存在時先寫入範例。`opened` 是開成功時要說的話，沒給就說開了哪個檔。
@@ -429,7 +395,8 @@ async function rememberDownloaded($: EngineInterface, version: string | null) {
 async function openInEditor($: EngineInterface, shown: string, sample?: string, opened?: string) {
   const path = under(await projectRoot($), shown)
   try {
-    if (sample !== undefined && (await files($).read(path)) === undefined) await $.fs.write(path, sample)
+    const disk = files($)
+    if (sample !== undefined && (await disk.read(path)) === undefined) await disk.write(path, sample)
     const isWindows = (await $.env.get('OS')) === 'Windows_NT'
     const argv = isWindows ? ['cmd', '/c', 'code', path] : ['code', path]
     const ran = await $.process.run(argv)
@@ -490,6 +457,14 @@ async function loadSkills($: EngineInterface) {
   })()
 }
 
+/** [SKILL] 目錄：原料（四個 atom）跟上次一樣就是上次那一份，列表與分組不重算 */
+const catalogOf = catalogCache()
+
+async function skillCatalog($: EngineInterface): Promise<SkillCatalog> {
+  const [list, fm, over, from] = await Promise.all([read($, commands), read($, frontmatter), read($, overrides), read($, skillSources)])
+  return catalogOf({ commands: list, frontmatter: fm, overrides: over, sources: from })
+}
+
 // ── SKILL 的開關 ─────────────────────────────────────────
 
 /** 讀專案的 settings.local.json，把 skillOverrides 與 enabledPlugins 寫進狀態；回傳讀到的原文（沒有檔是 undefined）。 */
@@ -528,46 +503,30 @@ async function ignoreLocalSettings($: EngineInterface) {
 }
 
 /**
- * 照一個開關動作改專案的 settings.local.json，重讀狀態並跳提示。`label` 是提示裡的名稱（skill、組或分類）；
- * `plugins` 是按整個分類時沒動到的 plugin 組有幾個。
+ * 按下一個開關：重讀專案的 settings.local.json，照 `planSwitch` 改寫、重讀狀態並跳提示。
+ * 停用／啟用 plugin 要代跑 `/reload-plugins` 才套用到這個 session，之後重讀指令清單：停用的 plugin 的 skill 不見了，
+ * 組改由停用名單畫出來。這會連 cockpit 自己一起重新載入；先跳提示，換上的新那一份照樣讀得到設定檔。
  */
-async function applySwitch($: EngineInterface, action: SwitchAction, label: string, plugins = 0) {
+async function applySwitch($: EngineInterface, press: Press) {
   const text = await loadSwitches($)
-  const done = rewriteSettings(text, action)
-  if (done.kind === 'unreadable') return void $.ui.toast(UNREADABLE_SETTINGS)
-  if (done.kind === 'write') {
+  const plan = planSwitch(text, press, await read($, frontmatter))
+  if (plan.write !== undefined) {
     try {
-      if (text === undefined) await ignoreLocalSettings($)
-      await (await projectFiles($)).write(LOCAL_SETTINGS, done.text)
+      if (plan.isNewFile) await ignoreLocalSettings($)
+      await (await projectFiles($)).write(LOCAL_SETTINGS, plan.write)
     } catch (err) {
       return void $.ui.toast(`無法寫入 ${LOCAL_SETTINGS}：${reasonOf(err)}`)
     }
-    await showSwitches($, done.text)
+    await showSwitches($, plan.write)
   }
-  if (action.kind === 'plugin') {
-    // 設定檔本來就是那個狀態：沒有東西要套用，不代跑 /reload-plugins（它會連 cockpit 一起重新載入）
-    if (done.kind === 'unchanged')
-      return void $.ui.toast(pluginToast({ turn: action.turn, plugin: label, isUnchanged: true }))
-    return applyPlugin($, action.turn, label)
-  }
-  // token 是有數字的那幾個的合計（和組、分類顯示的一樣）；一個都沒有才省略
-  const tokens = tokensOf(action.names, await read($, frontmatter))
-  $.ui.toast(switchToast({ turn: action.turn, label, count: action.names.length, tokens, plugins }))
-}
-
-/**
- * plugin 的停用／啟用要 `/reload-plugins` 才套用到這個 session（skillOverrides 不用，設定檔會熱重載）。
- * 代跑之後重讀指令清單：停用的 plugin 的 skill 不見了，組改由停用名單畫出來。
- * 這會連 cockpit 自己一起重新載入；先跳提示，換上的新那一份照樣讀得到設定檔。
- */
-async function applyPlugin($: EngineInterface, turn: 'on' | 'off', plugin: string) {
+  if (!plan.reload) return void $.ui.toast(plan.toast())
   let reloadError: string | undefined
   try {
     await $.command.run({ command: 'reload-plugins' })
   } catch (err) {
     reloadError = reasonOf(err)
   }
-  $.ui.toast(pluginToast({ turn, plugin, ...(reloadError === undefined ? {} : { reloadError }) }))
+  $.ui.toast(plan.toast(reloadError))
   await loadSkills($)
 }
 
@@ -580,12 +539,7 @@ async function translateSkills($: EngineInterface) {
   try {
     const ran = await translating.run('translate', async () =>
       translateAll(
-        listedCommands(
-          await read($, commands),
-          await read($, frontmatter),
-          await read($, overrides),
-          await read($, skillSources),
-        ),
+        (await skillCatalog($)).listed(),
         await read($, translations),
         askModel($, 'haiku', 16000),
         async got => {
@@ -614,16 +568,7 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
       async () => {
         const { dirs, fs } = await skillFiles($)
         // 每個 skill 都先找原文；要不要重新整理由 makeHowtos 判斷
-        const items = await howtoItems(
-          listedCommands(
-            await read($, commands),
-            await read($, frontmatter),
-            await read($, overrides),
-            await read($, skillSources),
-          ),
-          dirs,
-          fs,
-        )
+        const items = await howtoItems((await skillCatalog($)).listed(), dirs, fs)
         // 原文改過的先從畫面上拿掉，舊的用法不留著
         const known = await update($, howtos, prev => withoutStale(prev, items))
         // 畫面每好一個就更新；存檔每幾個一次，最後再補存剩下的
@@ -690,175 +635,11 @@ async function showRoadmap($: EngineInterface, efforts: Effort[]) {
   await update($, roadmap, () => efforts)
 }
 
-/**
- * 重新載入所有 mod（引擎沒有只重載自己的方法）：跑內建的 `/reload-plugins`。
- * 重載後這份程式會被換掉，所以先在 `$.store` 記下時間，由新的那一份在 session.start 回報。
- */
-async function reloadMods($: EngineInterface) {
-  try {
-    await $.store.set('reloadingAt', await $.clock.now())
-    const ran = await $.command.run({ command: 'reload-plugins' })
-    const said = ran.text?.trim().split('\n')[0]
-    if (said) $.ui.toast(said)
-  } catch (err) {
-    await $.store.set('reloadingAt', null)
-    $.ui.toast(`無法重新載入 mod：${reasonOf(err)}`)
-  }
-}
-
-// ── 更新 ─────────────────────────────────────────────────
-
-/** 更新用的 `claude plugin …` 指令最多等多久（毫秒）：要連 GitHub，比引擎預設的 30 秒寬 */
-const UPDATE_TIMEOUT = 120_000
-
-/**
- * 看現在發布的是哪一版，和這一份比；看不到當作查不到。
- * 從 marketplace 裝的：先把 marketplace 拉到最新，讀它本機 clone 裡的 plugin.json（就是更新會裝的那一版）。
- * 從資料夾載入的：只能上網看發布 repo。
- * 從 marketplace 裝的查到了就記下查到的版本：留著的標示看它，所以開場的檢查與手動的「檢查版本」都會更新。
- * 檢查的時間不在這裡記（`rememberChecked`）：查到了、該做的事也做成了才算檢查過。
- * `changelog` 是發布的那一份更新紀錄（clone 裡、plugin.json 旁邊，剛拉到最新所以不必再上網）；從資料夾載入的沒有。
- */
-async function checkRelease($: EngineInterface): Promise<{ current: string; found: Verdict; changelog?: string }> {
-  const current = await readVersion($)
-  const install = await installOf($)
-  let latest = ''
-  let changelog: string | undefined
-  try {
-    if (install) {
-      const ran = await $.process.run(refreshCommand(install), { timeoutMs: UPDATE_TIMEOUT })
-      if (ran.exitCode === 0) {
-        const dir = marketplaceDir(await homeDir($), install.marketplace)
-        const manifest = releasedManifest(dir, await files($).read(catalogPath(dir)), install.plugin)
-        if (manifest !== undefined) latest = versionIn(await files($).read(manifest))
-        if (manifest !== undefined && latest !== '' && latest !== current)
-          changelog = await files($).read(changelogBeside(manifest))
-      }
-    } else {
-      const reply = await $.http.fetch(RELEASE_MANIFEST)
-      if (reply.ok) latest = versionIn(reply.text)
-    }
-  } catch {}
-  if (install && latest !== '') await rememberReleased($, latest)
-  return { current, found: verdict(current, latest, install), changelog }
-}
-
-/**
- * 記下這次檢查過了，開場檢查隔多久看它。查不到發布的版本、或開場該在背景做的下載沒做成時不記：
- * 那不算檢查過，下次開場不等四小時就再試。
- */
-const rememberChecked = async ($: EngineInterface) => $.store.set('checkedAt', await $.clock.now())
-
-/**
- * 把發布的那一版下載到磁碟上（跑著的這一份不變）；失敗時跳 toast 並回 false。
- * `quiet` 是開場在背景下載的那一次：失敗不講，下次檢查再試。
- */
-async function downloadUpdate($: EngineInterface, install: Install, quiet = false): Promise<boolean> {
-  const failed = (reason: string | number) => {
-    if (!quiet) $.ui.toast(`無法更新 cockpit：${reason}`)
-    return false
-  }
-  try {
-    const ran = await $.process.run(updateCommand(install), { timeoutMs: UPDATE_TIMEOUT })
-    if (ran.exitCode === 0) return true
-    // 更新不成（最常見的是 Claude Code 還沒把這一份記成已安裝）：改用安裝；還是不成才算失敗，講的是更新那一次的原因
-    const installed = await $.process.run(installCommand(install), { timeoutMs: UPDATE_TIMEOUT })
-    return installed.exitCode === 0 || failed((ran.stderr.trim() || ran.stdout.trim()).split('\n')[0] || ran.exitCode)
-  } catch (err) {
-    return failed(reasonOf(err))
-  }
-}
-
-/**
- * 查到發布的版本就是裝著的這一版時收尾（開場檢查與「檢查版本」共用）：之前下載、還沒換上的紀錄不再算數。
- * 已下載的是別的版本（作者發了又收回）時磁碟上還是那一版，下次開啟會換上它，所以先把磁碟換回發布的版本
- * （和下載是同一個指令），成功才清掉紀錄。換不回去就安靜略過、紀錄留著，也不算檢查過，下次再試。
- */
-async function settleSame($: EngineInterface, current: string) {
-  const install = await installOf($)
-  if (install !== undefined) {
-    const downloaded = storedVersion(await $.store.get('downloadedVersion'))
-    if (shouldRestore(current, downloaded) && !(await downloadUpdate($, install, true))) return
-    await rememberChecked($)
-  }
-  await rememberDownloaded($, null)
-}
-
-/**
- * [設定] 的「檢查版本」：和發布的版本不一樣就問要不要立即更新（退版時問要不要換上），要的話下載後重新載入 mod。
- * 升版時問句後面列出這幾版的更新紀錄；退版或讀不到更新紀錄時照樣問，只是不列。
- */
-async function checkVersion($: EngineInterface) {
-  const { current, found, changelog } = await checkRelease($)
-  if (found.kind === 'unknown') return void $.ui.toast('查不到發布的版本，請確認網路後再試')
-  if (found.kind === 'same') {
-    await settleSame($, current)
-    return void $.ui.toast(`cockpit ${current} 已經是發布的版本`)
-  }
-  if (found.kind === 'update') await rememberChecked($)
-  if (found.kind === 'manual')
-    return void $.ui.toast(`發布的版本是 ${found.latest}；這一份是從資料夾載入的，請自行換成新版`)
-  const words = wordingFor(current, found.latest)
-  // 問過就算提示過這一版，之後開場不再為它提示
-  await $.store.set('notifiedVersion', found.latest)
-  let answer: string
-  try {
-    const question = withNotes(words.question(current, found.latest), notesBetween(changelog, current, found.latest))
-    answer = await $.ui.ask(question, [words.accept, UPDATE_LATER])
-  } catch {
-    // 把詢問關掉就是先不要
-    return
-  }
-  if (answer !== words.accept) return
-  $.ui.toast(words.switching(found.latest))
-  if (!(await downloadUpdate($, found.install))) return
-  await rememberDownloaded($, found.latest)
-  await reloadMods($)
-}
-
 /** [設定] 的「更新紀錄」：用編輯器打開裝著的那一份；這一版沒有那個檔就說沒有。 */
 async function openChangelog($: EngineInterface) {
   const path = changelogIn($.plugin.root)
   if ((await files($).read(path)) === undefined) return void $.ui.toast(NO_CHANGELOG)
   await openInEditor($, path, undefined, '已開啟更新紀錄')
-}
-
-/**
- * 開場查到不一樣的版本、而且該自己下載時（「自動更新」開著，或作者退版）做的事：下載，下次開啟時換上；同一版只下載一次。
- * 回傳這一版是不是已經在磁碟上了。下載失敗不講原因、回 false，標示維持還沒下載的樣子。
- */
-async function autoUpdate($: EngineInterface, found: Extract<Verdict, { kind: 'update' }>): Promise<boolean> {
-  if ((await $.store.get('downloadedVersion')) === found.latest) return true
-  if (!(await downloadUpdate($, found.install, true))) return false
-  await rememberDownloaded($, found.latest)
-  return true
-}
-
-/**
- * 開場的檢查：從 marketplace 裝的那一份，距離上次檢查滿四小時才去看發布的版本，「自動更新」開不開都看。
- * 不一樣而「自動更新」開著，或發布的版本比裝的舊（退版，「自動更新」關著也一樣）：在背景下載。
- * 升版而「自動更新」關著：不下載；標示由 `checkRelease` 記下的版本留著。
- * 每個發布的版本開場只提示一次，不管是哪一句：下載好了講已下載，沒下載（不必下載或下載失敗）講到 [設定] 按「檢查版本」；
- * 提示過（含在「檢查版本」被問過）的那一版，之後下載好了也不再講。
- * 背景的下載失敗不算檢查過：不記檢查的時間，下次開場再試。
- * 發布的版本就是裝著的這一版：把之前下載、還沒換上的別的版本換回去（`settleSame`）。
- * 在背景跑，查不到或中途出錯都安靜略過。
- */
-async function startupCheck($: EngineInterface) {
-  try {
-    const [checkedAt, now] = await Promise.all([$.store.get('checkedAt'), $.clock.now()])
-    if (!shouldCheck(await installOf($), checkedAt, now)) return
-    const { current, found } = await checkRelease($)
-    if (found.kind === 'same') return void (await settleSame($, current))
-    if (found.kind !== 'update') return
-    const isWanted = shouldDownload(current, found.latest, config.settings.autoUpdate)
-    const isDownloaded = isWanted && (await autoUpdate($, found))
-    if (isDownloaded || !isWanted) await rememberChecked($)
-    if (!shouldNotify(found.latest, await $.store.get('notifiedVersion'))) return
-    await $.store.set('notifiedVersion', found.latest)
-    const words = wordingFor(current, found.latest)
-    $.ui.toast(isDownloaded ? words.downloadedNotice(found.latest) : words.availableNotice(found.latest))
-  } catch {}
 }
 
 // ── 填入輸入框 ───────────────────────────────────────────
@@ -915,37 +696,30 @@ async function toggleFold($: EngineInterface, fold: Fold, id: string) {
   await $.store.set(fold, next)
 }
 
-/** 開場時把上個 session 存的面板狀態讀回來；各個鍵同時讀、同時寫，形狀不對的維持預設。 */
-async function restoreRemembered(
-  $: EngineInterface,
-): Promise<{ lastTab: unknown; reloadingAt: unknown; seenVersion: unknown }> {
-  const [lastTab, reloadingAt, seenVersion, released, downloaded, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, install, category] = await Promise.all([
+/**
+ * 開場時把上個 session 存的面板狀態讀回來；各個鍵同時讀、同時寫，形狀不對的維持預設。
+ * 更新用的鍵（記著的版本）由 `updater.ts` 的 `open` 讀回。
+ */
+async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown }> {
+  const [lastTab, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, category] = await Promise.all([
     $.store.get('lastTab'),
-    $.store.get('reloadingAt'),
-    $.store.get('seenVersion'),
-    $.store.get('releasedVersion'),
-    $.store.get('downloadedVersion'),
     $.store.get('translations'),
     $.store.get('howtos'),
     $.store.get('openEfforts'),
     $.store.get('openSkillGroups'),
     $.store.get('closedPromptGroups'),
-    installOf($),
     $.store.get('skillCategory'),
   ])
   await Promise.all([
-    // 上次查到的發布版本：沒有重新檢查的這次開場，標示也照它留著；從資料夾載入的不標示
-    update($, releasedVersion, () => (install !== undefined ? storedVersion(released) : '')),
-    update($, downloadedVersion, () => (install !== undefined ? storedVersion(downloaded) : '')),
     update($, openEfforts, list => storedList(efforts) ?? list),
     update($, openSkillGroups, list => storedList(skillGroups) ?? list),
     update($, closedPromptGroups, list => storedList(promptGroups) ?? list),
-    update($, skillCategory, () => storedCategory(category)),
+    update($, skillCategory, () => storedText(category)),
     update($, translations, () => storedTranslations(cachedTranslations)),
     // 用法的快取：形狀不對或舊版 prompt 整理的不收
     update($, howtos, () => storedHowtos(cachedHowtos)),
   ])
-  return { lastTab, reloadingAt, seenVersion }
+  return { lastTab }
 }
 
 /** 打開一個 skill 的用法頁：從它的第一頁看起，並記下列表原本停在第幾頁。 */
@@ -1128,7 +902,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
       onPress={() => void dispatch($, { kind: 'clearCompleted' })}
     />
   ) : undefined
-  const actionsWidth = view.hasCompleted ? keysWidth([{ hotkey: 'c', label: '清除已完成' }]) : 0
+  const actionsWidth = view.hasCompleted ? footWidth([{ hotkey: 'c', label: '清除已完成' }]) : 0
 
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
   const todoRows: Row<JSX.Element>[] = view.rows.map(r => {
@@ -1443,7 +1217,7 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   }
 
   // 分頁的操作疊在下框線上，和其他分頁同一個位置
-  const actionsWidth = keysWidth([
+  const actionsWidth = footWidth([
     { hotkey: 'e', label: '編輯' },
     ...(hasProject ? [{ hotkey: 'p', label: '編輯本專案' }] : []),
     { hotkey: 'r', label: '重新載入' },
@@ -1477,21 +1251,18 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   return { actions, actionsWidth, rows, emptyText: '還沒有常用 prompt，按 [ 編輯 ] 建立。' }
 }
 
-/** 關掉翻譯或用法時傳給分組的空表；固定同一個，下面的記憶才比得出「沒變」 */
-const NOTHING = {}
 
-type GroupInputs = Parameters<typeof groupSkills>
-let lastGroups: { inputs: GroupInputs; groups: ReturnType<typeof groupSkills> } | undefined
-
-/**
- * 把 skill 分組（要排序、要算每個說明的雜湊）。輸入跟上次是同一份就用上次的結果；
- * 搜尋框每打一個字都會重畫，但清單本身沒變。
- */
-function skillGroups(...inputs: GroupInputs) {
-  if (lastGroups === undefined || inputs.some((v, i) => v !== lastGroups?.inputs[i]))
-    lastGroups = { inputs, groups: groupSkills(...inputs) }
-  return lastGroups.groups
-}
+// [SKILL] 行尾留的寬度（名稱裁短時扣掉這些）；按鈕的字取最寬的那一個
+/** 開關模式一個 skill：token 數與 `[ 開 ]` */
+const SWITCH_TAIL = tailWidth([{ tokens: true }, { button: '開' }])
+/** 開關模式 plugin 的 skill：只有 token 數（沒有開關） */
+const TOKENS_TAIL = tailWidth([{ tokens: true }])
+/** 開關模式的組：token 數與 `[ 部分 ]` */
+const GROUP_SWITCH_TAIL = tailWidth([{ tokens: true }, { button: '部分' }])
+/** 開關模式的 plugin 組：token 數與 `[ 停用整個 plugin ]` */
+const PLUGIN_SWITCH_TAIL = tailWidth([{ tokens: true }, { button: '停用整個 plugin' }])
+/** 平常模式的組：「部分關」 */
+const GROUP_STATE_TAIL = tailWidth([{ plain: '部分關' }])
 
 /** [SKILL] 分頁：已安裝的 skill，依 plugin 分組；頂端是搜尋框。點了把 `/<skill 名稱> ` 填進輸入框。 */
 async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): Promise<TabContent> {
@@ -1535,21 +1306,21 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     read($, pluginSwitches),
     read($, installedPluginKeys),
   ])
-  // 停用了的 plugin，skill 已經不在清單裡；照樣畫出它的組（空的），才按得到「啟用」
-  const offPlugins = disabledPlugins(enabledPlugins, installed)
-  const all = withDisabledPlugins(
-    skillGroups(
-      listed,
-      fm,
-      over,
-      settings.translate ? translated : NOTHING,
+  // 每個 skill、組、分類的開關狀態與按下去做什麼（停用了的 plugin 照樣有一組，才按得到「啟用」）
+  const board = switchboard({
+    commands: listed,
+    frontmatter: fm,
+    overrides: over,
+    groups: catalogOf({ commands: listed, frontmatter: fm, overrides: over, sources: from }).groups({
+      ...(settings.translate ? { translations: translated } : {}),
       // 「整理用法」關掉時當作都沒有用法：沒有「?」、進不了用法頁、搜尋也不比對；存著的用法不動
-      settings.howto ? known : NOTHING,
-      from,
-    ),
-    offPlugins,
-    over,
-  )
+      ...(settings.howto ? { howtos: known } : {}),
+    }),
+    switches,
+    enabledPlugins,
+    installed,
+  })
+  const all = board.groups
 
   // ── 用法頁：搜尋框與列表換成一個 skill 的說明與用法 ──
   const shown = pageName === '' ? undefined : all.flatMap(g => g.items).find(s => s.name === pageName)
@@ -1654,7 +1425,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   const open = new Set(openIds)
   const isSearching = query.trim() !== ''
   // 有分類時一次看選中的那個分類；搜尋時列出所有有符合項目的分類（規則在 skills.ts 的 skillView）
-  const categories = categorize(all, over.categories)
+  const { categories } = board
   const view = skillView(all, categories, chosenCategory, query)
   const { picked, isHeadOnTop } = view
 
@@ -1710,7 +1481,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     ? undefined
     : isMakingNow
       ? {
-          width: textWidth('用法整理中…'),
+          pieces: [{ plain: '用法整理中…' }],
           el: (
             <Box key="howto-making" flexShrink={0}>
               <Text dimColor>用法整理中…</Text>
@@ -1719,8 +1490,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         }
       : isChoosing
         ? {
-            // 按了「更新用法」：選只補缺的（快速），或全部重新問一次（重整）；「×」畫成「[ × ]」
-            width: textWidth('q: 快速') + 2 + textWidth('r: 重整') + 2 + textWidth('[ × ]'),
+            // 按了「更新用法」：選只補缺的（快速），或全部重新問一次（重整）
+            pieces: [{ hotkey: 'q', label: '快速' }, { hotkey: 'r', label: '重整' }, { button: '×' }],
             el: (
               <Box key="howto-menu" flexDirection="row" gap={2} flexShrink={0}>
                 <Button key="howto-quick" label="快速" plain hotkey="q" onPress={() => void runHowtos('quick')} />
@@ -1730,7 +1501,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             ),
           }
         : {
-            width: keysWidth([{ hotkey: 'u', label: '更新用法' }]) - 2,
+            pieces: [{ hotkey: 'u', label: '更新用法' }],
             el: (
               <Button
                 key="refresh-howtos"
@@ -1741,7 +1512,6 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
               />
             ),
           }
-  const switchWidth = keysWidth([{ hotkey: 'o', label: isSwitching ? '完成' : '開關' }]) - 2
   // 覆寫檔（skills.json）管的是這個分頁怎麼分組與顯示，按鈕放在這裡；檔案還不存在時先建立範例
   const editOverrides = (
     <Button
@@ -1756,7 +1526,6 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       }
     />
   )
-  const editWidth = keysWidth([{ hotkey: 'e', label: '編輯覆寫' }]) - 2
   const actions = (
     <Box key="skill-actions" flexDirection="row" gap={2}>
       {switchButton}
@@ -1764,41 +1533,28 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       {editOverrides}
     </Box>
   )
-  // 頭尾各留一格（`keysWidth` 的算法）
-  const actionsWidth = 2 + switchWidth + (howtoAction === undefined ? 0 : 2 + howtoAction.width) + 2 + editWidth
+  const actionsWidth = footWidth([
+    { hotkey: 'o', label: isSwitching ? '完成' : '開關' },
+    ...(howtoAction?.pieces ?? []),
+    { hotkey: 'e', label: '編輯覆寫' },
+  ])
 
-  // plugin 的 skill 沒有單獨的開關，看它的 plugin 有沒有停用（move 混進一般組的也是）；其他的照 skillOverrides 算開或關
-  const plugins = pluginSkills(listed)
-  const owners = skillPlugins(listed)
-  const isOff = (s: SkillItem) => {
-    const owner = owners.get(s.name)
-    return owner === undefined ? isSkillOff(s.name, switches) : isPluginOff(owner, enabledPlugins)
-  }
   /**
    * 開關模式裡一個 skill 的那一行：名稱、token 數與 [開]／[關]。
    * plugin 的 skill 沒有單獨的開關（要停用整個 plugin），行尾只有 token 數。
    */
   const switchRow = (s: SkillItem) => {
-    const off = isOff(s)
-    const tokens = skillTokens(s.name, fm)
-    const isPluginSkill = plugins.has(s.name)
+    const { isOff, tokens, press } = board.skill(s)
     const tail =
-      isPluginSkill && tokens === undefined ? null : (
+      press === undefined && tokens === undefined ? null : (
         <Box key={`switch-cell-${s.name}`} flexDirection="row" gap={1} flexShrink={0}>
           {tokens === undefined ? null : <Text dimColor>{String(tokens)}</Text>}
-          {isPluginSkill ? null : (
-            <Button
-              key={`switch-${s.name}`}
-              label={off ? '關' : '開'}
-              dimColor={off}
-              onPress={() =>
-                void applySwitch($, { kind: 'skills', turn: off ? 'on' : 'off', names: [s.name] }, s.label)
-              }
-            />
+          {press === undefined ? null : (
+            <Button key={`switch-${s.name}`} label={isOff ? '關' : '開'} dimColor={isOff} onPress={() => void applySwitch($, press)} />
           )}
         </Box>
       )
-    const tailWidth = tail === null ? 0 : isPluginSkill ? TOKENS_TAIL : SWITCH_TAIL
+    const tailWidth = tail === null ? 0 : press === undefined ? TOKENS_TAIL : SWITCH_TAIL
     return (
       <Box flexDirection="row" paddingLeft={2} gap={1}>
         <Box flexGrow={1} flexShrink={1}>
@@ -1808,61 +1564,26 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       </Box>
     )
   }
-  // ── 組與分類的開關：不存狀態，由底下可開關（非 plugin）的 skill 算出 ──
-  /** 整組（搜尋時也算整組、整個分類，不只符合的那幾個） */
-  const fullGroups = new Map(all.map(g => [g.id, g]))
-  const fullGroup = (g: SkillGroup) => fullGroups.get(g.id) ?? g
-  /** 底下可開關的 skill */
-  const switchable = (groups: readonly SkillGroup[]) =>
-    groups.flatMap(g => fullGroup(g).items.filter(s => !plugins.has(s.name)).map(s => s.name))
-  const summaryOf = (groups: readonly SkillGroup[]) => summarize(switchable(groups), switches, fm)
-  const fullCategory = (name: string) => categories?.find(c => c.name === name)
-  /** 這一組是哪個 plugin 的 plugin 組；不是 plugin 組（move 開的自訂組、混了一般 skill 的組）是 undefined */
-  const pluginOf = (g: SkillGroup) => groupPlugin(g.id, fullGroup(g).items.map(s => s.name), owners, offPlugins)
   /**
-   * plugin 組的狀態與開關模式的行尾：狀態看 enabledPlugins；開關寫「plugin 開」／「停用整個 plugin」，和一般的開關看得出不同。
-   * 不是 plugin 組是 undefined；查不到完整的鍵（不在已安裝清單、或是 cockpit 自己）時有狀態、沒有開關。
+   * 一組或一個分類行尾的 token 數與開關；沒有開關可按時沒有。plugin 組的開關寫「plugin 開」／「停用整個 plugin」，
+   * 和一般的開、關、部分看得出不同。
    */
-  const pluginSwitchTail = (g: SkillGroup) => {
-    const plugin = pluginOf(g)
-    if (plugin === undefined) return undefined
-    const isGroupOff = isPluginOff(plugin, enabledPlugins)
-    const key = pluginKey(plugin, installed)
-    if (key === undefined) return { isOff: isGroupOff, tail: null }
-    const tokens = isGroupOff ? undefined : tokensOf(fullGroup(g).items.map(s => s.name), fm)
-    const tail = (
-      <Box key={`plugin-switch-${g.id}-tail`} flexDirection="row" gap={1} flexShrink={0}>
-        {tokens === undefined ? null : <Text dimColor>{shortTokens(tokens)}</Text>}
-        <Button
-          key={`plugin-switch-${g.id}`}
-          label={isGroupOff ? '停用整個 plugin' : 'plugin 開'}
-          dimColor={isGroupOff}
-          onPress={() => void applySwitch($, { kind: 'plugin', turn: isGroupOff ? 'on' : 'off', key }, plugin)}
-        />
-      </Box>
-    )
-    return { isOff: isGroupOff, tail }
-  }
-  /** 一組或一個分類行尾的 token 數與開關；沒有可開關的 skill 時沒有 */
-  const batchTail = (key: string, summary: SwitchSummary, onPress: () => void) =>
-    summary.state === undefined ? null : (
+  const switchTail = (key: string, at: { isPlugin?: boolean; state?: SwitchState; tokens?: number; press?: Press }) => {
+    const { state, tokens, press } = at
+    if (state === undefined || press === undefined) return null
+    const label = at.isPlugin ? (state === 'off' ? '停用整個 plugin' : 'plugin 開') : stateLabel(state)
+    return (
       <Box key={`${key}-tail`} flexDirection="row" gap={1} flexShrink={0}>
-        {summary.tokens === undefined ? null : <Text dimColor>{shortTokens(summary.tokens)}</Text>}
-        <Button key={key} label={stateLabel(summary.state)} dimColor={summary.state !== 'on'} onPress={onPress} />
+        {tokens === undefined ? null : <Text dimColor>{shortTokens(tokens)}</Text>}
+        <Button key={key} label={label} dimColor={state !== 'on'} onPress={() => void applySwitch($, press)} />
       </Box>
     )
-  /** 按組或分類的開關：開或部分就把開著的全部關掉，關就全部打開 */
-  const flipBatch = (groups: readonly SkillGroup[], label: string, pluginGroups = 0) => {
-    const action = flipAll(switchable(groups), switches)
-    if (action !== undefined) void applySwitch($, action, label, pluginGroups)
   }
   /** 開關模式裡「整個分類」那一列；分類裡沒有可開關的 skill（只有 plugin 組）時沒有這一列 */
   const categorySwitchRow = (name: string): Row<JSX.Element> | undefined => {
-    const c = fullCategory(name)
+    const c = board.category(name)
     if (c === undefined) return undefined
-    const tail = batchTail(`category-switch-${name}`, summaryOf(c.groups), () =>
-      flipBatch(c.groups, name, pluginGroupCount(c.groups, owners, offPlugins)),
-    )
+    const tail = switchTail(`category-switch-${name}`, { ...c.summary, ...(c.press === undefined ? {} : { press: c.press }) })
     if (tail === null) return undefined
     return {
       id: `skill-category-switch-${name}`,
@@ -1878,8 +1599,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   }
   /** 分類的標題列：`<分類>：<開的數>/<總數> 開 · <N> tokens`；在頂端的那一列右邊是開關模式的按鈕 */
   const categoryHead = (name: string) => {
-    const c = fullCategory(name)
-    const title = categoryTitle(name, c === undefined ? { on: 0, total: 0 } : summaryOf(c.groups))
+    const title = categoryTitle(name, board.category(name)?.summary ?? { on: 0, total: 0 })
     return (
       <Box key={`skill-cat-head-${name}`} flexDirection="row" gap={1}>
         <Box flexGrow={1} flexShrink={1}>
@@ -1898,14 +1618,13 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   // 有分類時頂端是一排分類分頁籤，照寫的順序，「未分類」在最後；整個分類關掉或部分關掉時標「·關」「·部分」。
   // 平常看一個分類時，它的 token 數接在同一列的右端（開了幾個看分頁籤的標記就知道），不另佔一行。
   // 搜尋框在底部（說明區下面）
-  const pickedTokens =
-    isHeadOnTop && picked !== undefined ? summaryOf(fullCategory(picked.name)?.groups ?? picked.groups).tokens : undefined
+  const pickedTokens = isHeadOnTop && picked !== undefined ? board.category(picked.name)?.summary.tokens : undefined
   const top =
     categories === undefined ? undefined : (
       <Box key="skill-top" flexDirection="row" gap={1}>
         <Box key="skill-categories" flexDirection="row" gap={1} flexGrow={1} flexShrink={1}>
           {categories.map(c => {
-            const label = tabLabel(c.name, summaryOf(c.groups).state)
+            const label = tabLabel(c.name, board.category(c.name)?.summary.state)
             return (
               <Button key={`skill-cat-${c.name}`} label={label} plain onPress={() => void pickCategory(c.name)}>
                 {c === picked ? (
@@ -1934,7 +1653,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       label={fitText(s.label, s.howto ? room - HOWTO_MARK : room)}
       plain
       // 關掉的 skill 變暗，照樣點了填入
-      dimColor={isOff(s)}
+      dimColor={board.skill(s).isOff}
       onPress={() => void fillPrompt($, `/${s.name} `, s.label)}
     />
   )
@@ -1979,20 +1698,16 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     const isOpen = isSearching || isSwitching || open.has(g.id)
     const group = { id: g.id, label: g.title }
     // plugin 組（底下全是同一個 plugin 的 skill，或停用後空了的）的開關是停用整個 plugin；其他組照 skill 算
-    const pluginTail = pluginSwitchTail(g)
-    const summary: SwitchSummary =
-      pluginTail === undefined ? summaryOf([g]) : { on: 0, total: 0, state: pluginTail.isOff ? 'off' : 'on' }
+    const at = board.group(g)
     // 開關模式：行尾是 token 數與開關；平常模式：整組或部分關掉的組名變暗、行尾標「已關」「部分關」
     const tail = isSwitching
-      ? pluginTail !== undefined
-        ? pluginTail.tail
-        : batchTail(`group-switch-${g.id}`, summary, () => flipBatch([g], g.title))
-      : summary.state === 'off' || summary.state === 'partial' ? (
+      ? switchTail(at.isPlugin ? `plugin-switch-${g.id}` : `group-switch-${g.id}`, at)
+      : at.state === 'off' || at.state === 'partial' ? (
           <Box key={`group-state-${g.id}`} flexShrink={0}>
-            <Text dimColor>{summary.state === 'off' ? '已關' : '部分關'}</Text>
+            <Text dimColor>{at.state === 'off' ? '已關' : '部分關'}</Text>
           </Box>
         ) : null
-    const switchTailWidth = pluginTail?.tail ? PLUGIN_SWITCH_TAIL : GROUP_SWITCH_TAIL
+    const switchTailWidth = at.isPlugin && at.press !== undefined ? PLUGIN_SWITCH_TAIL : GROUP_SWITCH_TAIL
     const groupTailWidth = tail === null ? 0 : isSwitching ? switchTailWidth : GROUP_STATE_TAIL
     rows.push({
       id: `skill-group-${g.id}`,
@@ -2136,10 +1851,10 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
         onPress={() => void (changed.size > 0 ? resetOptions($) : undefined)}
       />
       {/* 面板的狀態怪怪的時候救急用 */}
-      <Button key="reload-mods" label="重新載入 mod" plain dimColor onPress={() => void reloadMods($)} />
+      <Button key="reload-mods" label="重新載入 mod" plain dimColor onPress={() => void updaterOf($).then(u => u.reload())} />
     </Box>
   )
-  const actionsWidth = 2 + textWidth(reset) + 2 + textWidth('重新載入 mod')
+  const actionsWidth = footWidth([{ plain: reset }, { plain: '重新載入 mod' }])
 
   // 目前裝的版本疊在下框線右端，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版。
   // 發布的版本和裝的不同時，版本號後面留著高亮的標示，換上之後才消失。已經下載的話按鈕換成「立即換上」：
@@ -2158,21 +1873,19 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
         </Text>
       )}
       {indicator?.kind === 'downloaded' ? (
-        <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void reloadMods($)} />
+        <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void updaterOf($).then(u => u.reload())} />
       ) : (
-        <Button key="check-version" label="檢查版本" plain onPress={() => void checkVersion($)} />
+        <Button key="check-version" label="檢查版本" plain onPress={() => void updaterOf($).then(u => u.check())} />
       )}
       <Button key="changelog" label="更新紀錄" plain onPress={() => void openChangelog($)} />
     </Box>
   )
-  const statusWidth =
-    2 +
-    textWidth(versionText) +
-    (indicator ? 2 + textWidth(indicator.text) : 0) +
-    2 +
-    textWidth(checkLabel) +
-    2 +
-    textWidth('更新紀錄')
+  const statusWidth = footWidth([
+    { plain: versionText },
+    ...(indicator ? [{ plain: indicator.text }] : []),
+    { plain: checkLabel },
+    { plain: '更新紀錄' },
+  ])
   return { actions, actionsWidth, status, statusWidth, rows }
 }
 
@@ -2205,18 +1918,8 @@ export const register: Register = (on, options) => {
       }),
     ])
     const { settings } = config
-    const { lastTab, reloadingAt, seenVersion } = await restoreRemembered($)
-    // 版本和上次開場時不一樣：講一聲換到哪一版（版本號變小是作者退版，說「退回」）
-    const version = await readVersion($)
-    const seen = typeof seenVersion === 'string' ? seenVersion : undefined
-    const isNewVersion = versionChanged(seen, version)
-    if (version !== '' && version !== seen) await $.store.set('seenVersion', version)
-    if (isNewVersion && seen !== undefined) $.ui.toast(wordingFor(seen, version).switched(version))
-    // 剛按過「重新載入 mod」：這一份是重載後的，回報一聲（已經講過換版就不重複）
-    if (typeof reloadingAt === 'number') {
-      await $.store.set('reloadingAt', null)
-      if (!isNewVersion && justReloaded(reloadingAt, await $.clock.now())) $.ui.toast('cockpit 已重新載入')
-    }
+    const updater = await updaterOf($)
+    const [{ lastTab }] = await Promise.all([restoreRemembered($), updater.open()])
     await update($, tab, () => startTab(settings.defaultTab, lastTab))
 
     void refresh($)
@@ -2226,7 +1929,7 @@ export const register: Register = (on, options) => {
     void roadmapChanged($, { kind: 'open' })
     if (settings.autoOpen) void $.ui.open({ id: PANE, title: TITLE })
     // 發布的版本排在最後、隔一下才去看：上面的事都排出去、面板開出來之後才開始，檢查不擋住面板的顯示
-    $.clock.after(STARTUP_CHECK_DELAY, () => void startupCheck($))
+    $.clock.after(STARTUP_CHECK_DELAY, () => void updater.startupCheck())
 
     // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器）
     syncTicker($, await read($, board))

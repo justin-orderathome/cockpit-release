@@ -12,12 +12,8 @@ import type { Translations } from './translate'
  * - `skillCategory`：[SKILL] 選中的分類名稱，字串；不是字串當作沒選（看第一個分類）。
  * - `lastTab`：上次停在哪個分頁（[設定] 不記）。
  * - `translations`、`howtos`：模型產生的快取（`howtos` 的驗證在 `howto.ts`）。
- * - `reloadingAt`：按「重新載入 mod」的時間，給重載後的那一份回報用。
- * - `seenVersion`：上次開場時的版本，用來發現換了版本。
- * - `downloadedVersion`：已經下載、還沒換上的版本，免得同一版下載兩次；它就是發布的版本時標示是「已下載」。
- * - `checkedAt`：上次檢查過發布版本的時間，開場檢查隔多久看它（規則在 `release.ts`）；查不到、或開場該做的下載沒做成時不記。
- * - `releasedVersion`：上次查到的發布版本，留著的標示看它；沒有重新檢查的開場也照它顯示。
- * - `notifiedVersion`：已經提示過的發布版本，同一版不提示第二次。
+ * - 更新用的 `seenVersion`、`reloadingAt`、`checkedAt`、`releasedVersion`、`downloadedVersion`、`notifiedVersion`：
+ *   只有 `updater.ts` 讀寫，各鍵的意思寫在那裡。
  *
  * 只記這個 session 的（不在這裡）：路線圖裡票的收合、是否顯示已完成的 effort、搜尋字串、翻到第幾頁。
  */
@@ -32,11 +28,11 @@ export const toggled = (list: readonly string[], id: string): string[] =>
 
 const isText = (v: unknown): v is string => typeof v === 'string'
 
-/** 存起來的版本號（`releasedVersion`、`downloadedVersion`）；沒存過或形狀不對是空的，就是沒有 */
-export const storedVersion = (value: unknown): string => (isText(value) ? value : '')
-
-/** 存起來的 [SKILL] 分類名稱；不是字串是空的，就是沒選（看第一個分類） */
-export const storedCategory = (value: unknown): string => (isText(value) ? value : '')
+/**
+ * 存起來的一個字串：版本號（`releasedVersion`、`downloadedVersion`）或 [SKILL] 的分類名稱（`skillCategory`）。
+ * 沒存過或形狀不對是空的，就是沒有（版本當作沒記、分類當作沒選，看第一個分類）。
+ */
+export const storedText = (value: unknown): string => (isText(value) ? value : '')
 
 /** 存起來的翻譯；形狀不對的整筆丟掉，下次再翻 */
 export function storedTranslations(value: unknown): Translations {

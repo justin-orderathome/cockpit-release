@@ -378,12 +378,33 @@ const cells = (c: string) => (isWide(c.codePointAt(0) ?? 0) ? 2 : 1)
 /** 文字在畫面上佔幾格 */
 export const textWidth = (text: string) => [...text].reduce((n, c) => n + cells(c), 0)
 
-/** 一排快捷鍵按鈕畫出來多寬：每個是「鍵: 標籤」，按鈕之間隔兩格，頭尾各留一格 */
-export const keysWidth = (keys: readonly { hotkey: string; label: string }[]) =>
-  keys.length === 0 ? 0 : keys.reduce((n, k) => n + textWidth(`${k.hotkey}: ${k.label}`), 0) + 2 * (keys.length - 1) + 2
+/**
+ * 一個按鈕或一段字畫出來的樣子：有快捷鍵的按鈕畫成「鍵: 標籤」，`plain` 的按鈕與文字照字畫，
+ * 一般的按鈕畫成「[ 標籤 ]」。token 數（`tokens`）最多佔 `TOKEN_CELLS` 格。
+ */
+export type Piece = { hotkey: string; label: string } | { plain: string } | { button: string } | { tokens: true }
+
+/** token 數最多佔幾格（`shortTokens` 寫出來的，例如 `12.3k`） */
+export const TOKEN_CELLS = 5
+
+const pieceWidth = (piece: Piece) =>
+  'hotkey' in piece
+    ? textWidth(`${piece.hotkey}: ${piece.label}`)
+    : 'plain' in piece
+      ? textWidth(piece.plain)
+      : 'button' in piece
+        ? textWidth(`[ ${piece.button} ]`)
+        : TOKEN_CELLS
+
+/** 下框線上的一排（分頁的操作、狀態、翻頁鍵）畫出來多寬：項目之間隔兩格，頭尾各留一格 */
+export const footWidth = (pieces: readonly Piece[]) =>
+  pieces.length === 0 ? 0 : pieces.reduce((n, p) => n + pieceWidth(p), 0) + 2 * (pieces.length - 1) + 2
+
+/** 行尾（接在名稱後面、靠右的那幾格）畫出來多寬：每一項前面隔一格；名稱裁短時扣掉這些 */
+export const tailWidth = (pieces: readonly Piece[]) => pieces.reduce((n, p) => n + 1 + pieceWidth(p), 0)
 
 /** 翻頁鍵（「k: 上頁  12/12  j: 下頁」，頭尾各一格）最寬佔幾格 */
-export const PAGER_WIDTH = keysWidth([{ hotkey: 'k', label: '上頁' }, { hotkey: 'j', label: '下頁' }]) + 5 + 2
+export const PAGER_WIDTH = footWidth([{ hotkey: 'k', label: '上頁' }, { plain: '12/12' }, { hotkey: 'j', label: '下頁' }])
 
 /**
  * 分頁的操作按鈕疊在下框線的左端、翻頁鍵在右端，都不佔行。框內寬 `columns` 格時，

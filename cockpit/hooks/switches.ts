@@ -1,13 +1,15 @@
 /**
  * [SKILL] 的開關：哪些 skill 關著、怎麼改設定檔、按完說什麼。純邏輯，不碰引擎；
- * 讀寫檔案與畫面在 `register.tsx`。
+ * 讀寫檔案與畫面在 `register.tsx`。`register.tsx` 只用兩個入口：`switchboard`（這一次畫面上每個 skill、組、
+ * 分類的狀態與按下去做什麼）與 `planSwitch`（按下去之後要寫什麼、要不要代跑重載、說什麼）。
  *
  * 開關的狀態只有一份：目前專案的 `.claude/settings.local.json` 裡的 `skillOverrides`，
  * 和 Claude Code 的 `/skills` 選單共用。cockpit 不另外記。
  */
 
-import type { CommandEntry, FrontmatterEntry, SkillGroup, SkillOverrides } from '../types'
-import { BUILTIN_SKILLS, MY_SKILLS } from './skills'
+import type { CommandEntry, FrontmatterEntry, SkillGroup, SkillItem, SkillOverrides } from '../types'
+import { BUILTIN_SKILLS, MY_SKILLS, categorize, pluginOf } from './skills'
+import type { SkillCategory } from './skills'
 import { shortTokens } from './usage'
 
 /** 開關寫在專案裡的哪個檔（相對於專案根目錄） */
@@ -235,9 +237,10 @@ export function pluginSkills(commands: readonly CommandEntry[]): Set<string> {
 /** plugin 的 skill 各屬哪個 plugin：skill 名稱 → plugin 名稱（引擎沒給就取名稱的前綴） */
 export function skillPlugins(commands: readonly CommandEntry[]): Map<string, string> {
   return new Map(
-    commands
-      .filter(c => c.source === 'plugin' && c.name.indexOf(':') > 0)
-      .map(c => [c.name, c.plugin ?? c.name.slice(0, c.name.indexOf(':'))] as const),
+    commands.flatMap(c => {
+      const plugin = pluginOf(c)
+      return plugin === undefined ? [] : [[c.name, plugin] as const]
+    }),
   )
 }
 
@@ -297,19 +300,6 @@ export function tokensOf(names: readonly string[], frontmatter: readonly Frontma
   return known.length === 0 ? undefined : known.reduce((a, n) => a + n, 0)
 }
 
-// ── 行尾留的寬度（格數）：名稱裁短時扣掉這些。token 數最多 5 格，按鈕畫成「[ 字 ]」，快捷鍵畫成「o: 」 ──
-
-/** 開關模式一個 skill 的行尾：token 數、間隔與 `[ 開 ]`，連同前面的間隔 */
-export const SWITCH_TAIL = 13
-/** 開關模式 plugin 的 skill 的行尾：只有 token 數（沒有開關），連同前面的間隔 */
-export const TOKENS_TAIL = 6
-/** 開關模式組的行尾：token 數、間隔與 `[ 部分 ]`，連同前面的間隔 */
-export const GROUP_SWITCH_TAIL = 15
-/** 開關模式 plugin 組的行尾：token 數、間隔與 `[ 停用整個 plugin ]`，連同前面的間隔 */
-export const PLUGIN_SWITCH_TAIL = 26
-/** 平常模式組的行尾：「部分關」，連同前面的間隔 */
-export const GROUP_STATE_TAIL = 7
-
 /** 組與分類的開關狀態：不存，由底下的 skill 算出 */
 export type SwitchState = 'on' | 'off' | 'partial'
 
@@ -361,4 +351,142 @@ export function tabLabel(name: string, state: SwitchState | undefined): string {
 /** 這個 skill 關著沒：`skillOverrides` 裡它的值（任一種寫法的鍵）不是 `"on"` 就算關；沒寫就是開。 */
 export function isSkillOff(name: string, overrides: Readonly<Record<string, unknown>>): boolean {
   return overrideKeys(name).some(key => Object.hasOwn(overrides, key) && overrides[key] !== 'on')
+}
+
+// ── 一次畫面上的開關：每個 skill、組、分類是什麼狀態，按下去做什麼 ──
+
+/** 按一個開關要做的事：動作、提示裡的名稱（skill、組或分類），按整個分類時還有沒動到的 plugin 組有幾個 */
+export type Press = { action: SwitchAction; label: string; plugins?: number }
+
+/** 一個 skill：關著沒、token 數；plugin 的 skill 沒有單獨的開關（`press` 是 undefined），只能整個停用 plugin */
+export type SkillSwitch = { isOff: boolean; tokens?: number; press?: Press }
+
+/**
+ * 一組：`isPlugin` 是 plugin 組（開關是停用整個 plugin）。`state` 是開、關或部分（plugin 組只有開或關；
+ * 沒有可開關的 skill 時沒有）；`tokens` 是開著的 token 合計。沒有 `press` 是沒有開關可按
+ * （沒有可開關的 skill，或 plugin 查不到完整的鍵、是 cockpit 自己）。
+ */
+export type GroupSwitch = { isPlugin: boolean; state?: SwitchState; tokens?: number; press?: Press }
+
+/** 一個分類：只算非 plugin 的 skill；按了不動分類裡的 plugin 組 */
+export type CategorySwitch = { summary: SwitchSummary; press?: Press }
+
+export type Switchboard = {
+  /** 列表要畫的組：停用了的 plugin 照樣有一組（空的），才按得到「啟用」 */
+  groups: SkillGroup[]
+  /** 照 `categories` 歸好的分類；沒有分類層是 undefined */
+  categories: SkillCategory[] | undefined
+  skill: (s: SkillItem) => SkillSwitch
+  /** 搜尋時傳進來的是篩過的組，狀態照樣用整組算（看組 id） */
+  group: (g: SkillGroup) => GroupSwitch
+  /** 不存在的分類是 undefined */
+  category: (name: string) => CategorySwitch | undefined
+}
+
+/**
+ * [SKILL] 這一次畫面上所有開關的狀態與動作。組與分類的狀態不存，由底下可開關（非 plugin）的 skill 算出；
+ * plugin 的 skill（move 混進一般組的也是）看它的 plugin 有沒有停用；plugin 組的開關是停用整個 plugin。
+ * `groups` 是分好的組（不含停用的 plugin），`switches` 是 `skillOverrides`，`enabledPlugins` 是 `enabledPlugins`，
+ * `installed` 是已安裝 plugin 的完整鍵。
+ */
+export function switchboard(seen: {
+  commands: readonly CommandEntry[]
+  frontmatter: readonly FrontmatterEntry[]
+  overrides: SkillOverrides
+  groups: readonly SkillGroup[]
+  switches: Readonly<Record<string, unknown>>
+  enabledPlugins: Readonly<Record<string, unknown>>
+  installed: readonly string[]
+}): Switchboard {
+  const { frontmatter, switches, enabledPlugins } = seen
+  const offPlugins = disabledPlugins(enabledPlugins, seen.installed)
+  const groups = withDisabledPlugins(seen.groups, offPlugins, seen.overrides)
+  const categories = categorize(groups, seen.overrides.categories)
+  const owners = skillPlugins(seen.commands)
+  const full = new Map(groups.map(g => [g.id, g]))
+  const fullGroup = (g: SkillGroup) => full.get(g.id) ?? g
+  const switchable = (gs: readonly SkillGroup[]) =>
+    gs.flatMap(g => fullGroup(g).items.filter(s => !owners.has(s.name)).map(s => s.name))
+  const pressAll = (names: readonly string[], label: string, plugins?: number): Press | undefined => {
+    const action = flipAll(names, switches)
+    return action === undefined ? undefined : { action, label, ...(plugins === undefined ? {} : { plugins }) }
+  }
+
+  return {
+    groups,
+    categories,
+    skill(s) {
+      const owner = owners.get(s.name)
+      const tokens = skillTokens(s.name, frontmatter)
+      const isOff = owner === undefined ? isSkillOff(s.name, switches) : isPluginOff(owner, enabledPlugins)
+      return {
+        isOff,
+        ...(tokens === undefined ? {} : { tokens }),
+        ...(owner !== undefined
+          ? {}
+          : { press: { action: { kind: 'skills', turn: isOff ? 'on' : 'off', names: [s.name] }, label: s.label } }),
+      }
+    },
+    group(g) {
+      const items = fullGroup(g).items.map(s => s.name)
+      const plugin = groupPlugin(g.id, items, owners, offPlugins)
+      if (plugin === undefined) {
+        const names = switchable([g])
+        const { state, tokens } = summarize(names, switches, frontmatter)
+        const press = pressAll(names, g.title)
+        return {
+          isPlugin: false,
+          ...(state === undefined ? {} : { state }),
+          ...(tokens === undefined ? {} : { tokens }),
+          ...(press === undefined ? {} : { press }),
+        }
+      }
+      const isOff = isPluginOff(plugin, enabledPlugins)
+      const key = pluginKey(plugin, seen.installed)
+      const tokens = isOff ? undefined : tokensOf(items, frontmatter)
+      return {
+        isPlugin: true,
+        state: isOff ? 'off' : 'on',
+        ...(tokens === undefined ? {} : { tokens }),
+        ...(key === undefined ? {} : { press: { action: { kind: 'plugin', turn: isOff ? 'on' : 'off', key }, label: plugin } }),
+      }
+    },
+    category(name) {
+      const c = categories?.find(x => x.name === name)
+      if (c === undefined) return undefined
+      const names = switchable(c.groups)
+      const press = pressAll(names, name, pluginGroupCount(c.groups, owners, offPlugins))
+      return { summary: summarize(names, switches, frontmatter), ...(press === undefined ? {} : { press }) }
+    },
+  }
+}
+
+/**
+ * 按下一個開關之後怎麼做：`text` 是剛讀到的 `settings.local.json`（沒有檔是 undefined）。
+ * - `write`：要寫進設定檔的新內容；不必寫或讀不懂時沒有。
+ * - `isNewFile`：設定檔原本不存在，寫之前先把它加進 repo 本機的 git 忽略清單。
+ * - `reload`：要代跑 `/reload-plugins`（停用或啟用 plugin 才要，skillOverrides 會熱重載）。
+ *   設定檔本來就是那個狀態時不代跑：它會連 cockpit 一起重新載入。
+ * - `toast`：做完之後的提示；`reloadError` 是代跑 `/reload-plugins` 失敗的原因。
+ */
+export type SwitchPlan = { write?: string; isNewFile: boolean; reload: boolean; toast: (reloadError?: string) => string }
+
+export function planSwitch(text: string | undefined, press: Press, frontmatter: readonly FrontmatterEntry[]): SwitchPlan {
+  const done = rewriteSettings(text, press.action)
+  const base = { ...(done.kind === 'write' ? { write: done.text } : {}), isNewFile: text === undefined }
+  const { action, label } = press
+  if (done.kind === 'unreadable') return { ...base, reload: false, toast: () => UNREADABLE_SETTINGS }
+  if (action.kind === 'plugin') {
+    if (done.kind === 'unchanged')
+      return { ...base, reload: false, toast: () => pluginToast({ turn: action.turn, plugin: label, isUnchanged: true }) }
+    return {
+      ...base,
+      reload: true,
+      toast: reloadError => pluginToast({ turn: action.turn, plugin: label, ...(reloadError === undefined ? {} : { reloadError }) }),
+    }
+  }
+  // token 是有數字的那幾個的合計（和組、分類顯示的一樣）；一個都沒有才省略
+  const tokens = tokensOf(action.names, frontmatter)
+  const count = action.names.length
+  return { ...base, reload: false, toast: () => switchToast({ turn: action.turn, label, count, tokens, plugins: press.plugins ?? 0 }) }
 }

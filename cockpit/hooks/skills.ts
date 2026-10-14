@@ -28,6 +28,15 @@ export function firstSentence(text: string): string {
   return (hit?.[1] ?? line).trim()
 }
 
+/**
+ * plugin 的 skill（名稱帶 `plugin:` 前綴的）屬於哪個 plugin：引擎沒給就取名稱的前綴。
+ * 不是 plugin 的 skill 是 undefined；mod 指令（plugin 但名稱沒有前綴）也不算。
+ */
+export function pluginOf(c: CommandEntry): string | undefined {
+  const colon = c.name.indexOf(':')
+  return c.source === 'plugin' && colon > 0 ? (c.plugin ?? c.name.slice(0, colon)) : undefined
+}
+
 const byLabel = (a: SkillItem, b: SkillItem) => a.label.localeCompare(b.label)
 
 /**
@@ -75,9 +84,9 @@ export function groupSkills(
 
   for (const c of commands) {
     if (hidden.has(c.name)) continue
-    const colon = c.name.indexOf(':')
-    if (c.source === 'plugin' && colon > 0) {
-      put(c.plugin ?? c.name.slice(0, colon), c, c.name.slice(colon + 1))
+    const plugin = pluginOf(c)
+    if (plugin !== undefined) {
+      put(plugin, c, c.name.slice(c.name.indexOf(':') + 1))
     } else if (c.source === 'user' && Object.hasOwn(sources, c.name)) {
       put(sources[c.name] ?? '', c, c.name)
     } else if (c.source === 'user') {
@@ -129,6 +138,53 @@ export const listedCommands = (
     groupSkills(commands, frontmatter, overrides, {}, {}, sources).flatMap(g => g.items.map(i => i.name)),
   )
   return commands.filter(c => names.has(c.name))
+}
+
+/** [SKILL] 目錄的原料：指令清單、用量明細（認內建 skill 用）、覆寫檔與 `npx skills` 的來源 */
+export type CatalogInputs = {
+  commands: readonly CommandEntry[]
+  frontmatter: readonly FrontmatterEntry[]
+  overrides: SkillOverrides
+  sources: SkillSources
+}
+
+/**
+ * 一份 [SKILL] 目錄：
+ * - `listed`：會列在 [SKILL] 裡的指令（不含隱藏的），翻譯與整理用法的對象。
+ * - `groups`：分好的組；沒給翻譯或用法就當作都沒有（設定關掉時）。
+ */
+export type SkillCatalog = {
+  listed: () => CommandEntry[]
+  groups: (shown?: { translations?: Translations; howtos?: Howtos }) => SkillGroup[]
+}
+
+// 沒給翻譯或用法時用的空表：固定同一個，下面的記憶才比得出「沒變」
+const NO_TRANSLATIONS: Translations = {}
+const NO_HOWTOS: Howtos = {}
+
+/**
+ * 記得上一份目錄的 `skillCatalog`：原料（照同一個物件比）跟上次一樣就給上次那一份，`listed` 與 `groups`
+ * 也各自記著上次的結果。分組要排序、要算每個說明的雜湊，而搜尋框每打一個字都會重畫，清單本身卻沒變。
+ */
+export function catalogCache(): (inputs: CatalogInputs) => SkillCatalog {
+  let last: { inputs: CatalogInputs; catalog: SkillCatalog } | undefined
+  return inputs => {
+    const keys = ['commands', 'frontmatter', 'overrides', 'sources'] as const
+    if (last !== undefined && keys.every(k => last?.inputs[k] === inputs[k])) return last.catalog
+    const { commands, frontmatter, overrides, sources } = inputs
+    let listed: CommandEntry[] | undefined
+    let grouped: { translations: Translations; howtos: Howtos; groups: SkillGroup[] } | undefined
+    const catalog: SkillCatalog = {
+      listed: () => (listed ??= listedCommands(commands, frontmatter, overrides, sources)),
+      groups: ({ translations = NO_TRANSLATIONS, howtos = NO_HOWTOS } = {}) => {
+        if (grouped === undefined || grouped.translations !== translations || grouped.howtos !== howtos)
+          grouped = { translations, howtos, groups: groupSkills(commands, frontmatter, overrides, translations, howtos, sources) }
+        return grouped.groups
+      },
+    }
+    last = { inputs, catalog }
+    return catalog
+  }
 }
 
 /** 搜尋：比對名稱、說明與四項用法（不分大小寫），只留有符合項目的組。 */
