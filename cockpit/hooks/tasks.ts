@@ -52,7 +52,7 @@ function syncTodos(
   return [...prev.filter(t => !isMine(t)), ...synced]
 }
 
-export const EMPTY_BOARD: TaskBoard = { tasks: [], agents: [], isFollowing: true }
+export const EMPTY_BOARD: TaskBoard = { tasks: [], agents: [], isFollowing: true, isHeld: false }
 
 /** 會改變任務的事：三種工具的呼叫，以及使用者在面板上的操作。 */
 export type TaskEvent =
@@ -66,8 +66,12 @@ export type TaskEvent =
   | { kind: 'dismissAgent'; id: string }
   /** 隱藏所有已完成的任務，以及所有任務都完成的 subagent 群組 */
   | { kind: 'clearCompleted' }
-  /** 使用者手動翻頁：停止自動跟隨 */
+  /** 使用者手動翻頁：停止自動跟隨，也不再算在看路線圖 */
   | { kind: 'unfollow' }
+  /** 使用者要看路線圖（按「重新載入路線圖」、展開 effort）：停止自動跟隨，任務有變化也不恢復 */
+  | { kind: 'hold' }
+  /** 不看路線圖了（收起 effort、切換分頁）：之後任務有變化就恢復自動跟隨 */
+  | { kind: 'release' }
 
 const isShown = (t: TaskItem) => !t.isDismissed
 
@@ -76,7 +80,7 @@ const toolTaskId = (id: string) => `task-${id}`
 
 /**
  * 任務的所有變化都在這裡：回傳新的任務、subagent 群組與跟隨狀態。
- * 任務有狀態變化時恢復自動跟隨。
+ * 任務有狀態變化時恢復自動跟隨；使用者正在看路線圖時（`isHeld`）不恢復，免得看票看到一半被拉走。
  */
 export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
   switch (event.kind) {
@@ -89,7 +93,12 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
         const group: AgentGroup = { id: owner, label: event.agent?.label || 'subagent', parentTaskId, isDismissed: false }
         agents = [...agents, group]
       }
-      return { tasks: syncTodos(board.tasks, event.todos, event.now, owner), agents, isFollowing: true }
+      return {
+        tasks: syncTodos(board.tasks, event.todos, event.now, owner),
+        agents,
+        isFollowing: !board.isHeld,
+        isHeld: board.isHeld,
+      }
     }
     case 'created': {
       const id = toolTaskId(event.id)
@@ -107,7 +116,7 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
         const renamed = parsed ? { ...t, title: parsed.title, estimateMs: parsed.estimateMs ?? t.estimateMs } : t
         return status !== undefined ? withStatus(renamed, status, event.now) : renamed
       })
-      return { ...board, tasks, isFollowing: status !== undefined || board.isFollowing }
+      return { ...board, tasks, isFollowing: (status !== undefined && !board.isHeld) || board.isFollowing }
     }
     case 'dismissTask':
       return { ...board, tasks: board.tasks.map(t => (t.id === event.id ? { ...t, isDismissed: true } : t)) }
@@ -125,7 +134,11 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
       }
     }
     case 'unfollow':
-      return board.isFollowing ? { ...board, isFollowing: false } : board
+      return board.isFollowing || board.isHeld ? { ...board, isFollowing: false, isHeld: false } : board
+    case 'hold':
+      return board.isHeld && !board.isFollowing ? board : { ...board, isFollowing: false, isHeld: true }
+    case 'release':
+      return board.isHeld ? { ...board, isHeld: false } : board
   }
 }
 

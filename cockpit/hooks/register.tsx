@@ -668,6 +668,8 @@ async function submitPrompt($: EngineInterface, text: string, label: string) {
 /** 切到某個分頁，並重讀那一頁的資料。 */
 async function setTab($: EngineInterface, next: Tab) {
   await closeHowto($)
+  // 換了分頁就不算在看路線圖了，之後任務有變化照常自動跟隨
+  await dispatch($, { kind: 'release' })
   await update($, tab, () => next)
   if (next !== 'settings') await $.store.set('lastTab', next)
   if (next === 'tasks') await roadmapChanged($, { kind: 'open' })
@@ -810,6 +812,21 @@ async function closeHowto($: EngineInterface) {
   await update($, pages, ps => ({ ...ps, skill: skillListPage }))
 }
 
+/** 按「重新載入路線圖」：重讀，翻回第一頁（路線圖在最上面），並在看路線圖的期間不自動跟隨 */
+async function lookAtRoadmap($: EngineInterface) {
+  await update($, pages, ps => ({ ...ps, tasks: 0 }))
+  await dispatch($, { kind: 'hold' })
+  await roadmapChanged($, { kind: 'open' })
+}
+
+/** 展開或收起 effort：展開時算在看票，不自動跟隨；一個都沒展開時恢復 */
+async function toggleEffort($: EngineInterface, name: string) {
+  await toggleFold($, 'openEfforts', name)
+  const open = await read($, openEfforts)
+  if (open.includes(name)) await dispatch($, { kind: 'hold' })
+  else if (open.length === 0) await dispatch($, { kind: 'release' })
+}
+
 async function turnPage($: EngineInterface, current: Tab, to: number) {
   await update($, pages, ps => ({ ...ps, [current]: Math.max(0, to) }))
   if (current === 'tasks') await dispatch($, { kind: 'unfollow' })
@@ -891,19 +908,6 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
       </Box>
     </Box>
   )
-  // 分頁的操作疊在下框線上，和其他分頁同一個位置
-  const actions = view.hasCompleted ? (
-    <Button
-      key="clear-done"
-      label="清除已完成"
-      plain
-      dimColor
-      hotkey="c"
-      onPress={() => void dispatch($, { kind: 'clearCompleted' })}
-    />
-  ) : undefined
-  const actionsWidth = view.hasCompleted ? footWidth([{ hotkey: 'c', label: '清除已完成' }]) : 0
-
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
   const todoRows: Row<JSX.Element>[] = view.rows.map(r => {
     const indent = r.depth * 2
@@ -1001,30 +1005,9 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
             group: roadmapGroup,
             isHeader: true,
             value: (
-              <Box flexDirection="row" gap={2}>
-                <Box flexGrow={1} flexShrink={1}>
-                  <Text bold wrap="truncate-end">
-                    路線圖
-                  </Text>
-                </Box>
-                {road.doneCount > 0 && (
-                  <Button
-                    key="toggle-done-efforts"
-                    label={showDone ? '隱藏已完成' : `已完成 ${road.doneCount}`}
-                    plain
-                    dimColor
-                    onPress={() => void update($, showDoneEfforts, v => !v)}
-                  />
-                )}
-                <Button
-                  key="reload-roadmap"
-                  label="重新載入"
-                  plain
-                  dimColor
-                  hotkey="r"
-                  onPress={() => void roadmapChanged($, { kind: 'open' })}
-                />
-              </Box>
+              <Text bold wrap="truncate-end">
+                路線圖
+              </Text>
             ),
           },
           ...road.rows.map((r): Row<JSX.Element> => {
@@ -1038,7 +1021,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
                 value: (
                   <Box flexDirection="row" gap={ROW_GAP}>
                     <Box flexGrow={1} flexShrink={1}>
-                      <Button key={`effort-btn-${f.name}`} label={r.label} plain onPress={() => void toggleFold($, 'openEfforts', f.name)} />
+                      <Button key={`effort-btn-${f.name}`} label={r.label} plain onPress={() => void toggleEffort($, f.name)} />
                     </Box>
                     {r.stage !== undefined && (
                       <Text color={f.stage === 'done' ? 'success' : undefined} dimColor={f.stage !== 'done'}>
@@ -1108,6 +1091,53 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
             }
           }),
         ]
+
+  // 分頁的操作疊在下框線上，和其他分頁同一個位置；路線圖的兩個也在這裡，
+  // 不放在「路線圖」那一行：自動翻到進行中的任務時，那一行常常不在這一頁
+  const hasRoadmap = efforts.length > 0
+  const doneLabel = showDone ? '隱藏已完成 effort' : `已完成 effort ${road.doneCount}`
+  const showsDoneToggle = hasRoadmap && road.doneCount > 0
+  const actionPieces = [
+    ...(view.hasCompleted ? [{ hotkey: 'c', label: '清除已完成' }] : []),
+    ...(showsDoneToggle ? [{ hotkey: 'd', label: doneLabel }] : []),
+    ...(hasRoadmap ? [{ hotkey: 'r', label: '重新載入路線圖' }] : []),
+  ]
+  const actions =
+    actionPieces.length === 0 ? undefined : (
+      <Box key="tasks-actions" flexDirection="row" gap={2}>
+        {view.hasCompleted && (
+          <Button
+            key="clear-done"
+            label="清除已完成"
+            plain
+            dimColor
+            hotkey="c"
+            onPress={() => void dispatch($, { kind: 'clearCompleted' })}
+          />
+        )}
+        {showsDoneToggle && (
+          <Button
+            key="toggle-done-efforts"
+            label={doneLabel}
+            plain
+            dimColor
+            hotkey="d"
+            onPress={() => void update($, showDoneEfforts, v => !v)}
+          />
+        )}
+        {hasRoadmap && (
+          <Button
+            key="reload-roadmap"
+            label="重新載入路線圖"
+            plain
+            dimColor
+            hotkey="r"
+            onPress={() => void lookAtRoadmap($)}
+          />
+        )}
+      </Box>
+    )
+  const actionsWidth = footWidth(actionPieces)
 
   // 有路線圖時，待辦清單前面加一行組名，跨頁時才看得出「（續）」是哪一組
   const todoGroup = { id: 'todos', label: '待辦' }

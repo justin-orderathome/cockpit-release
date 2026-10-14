@@ -39,6 +39,8 @@ export type TaskBoard = {
   agents: AgentGroup[]
   /** 是否自動翻到最近開始的進行中任務 */
   isFollowing: boolean
+  /** 使用者正在看路線圖（按了「重新載入路線圖」或展開 effort）：任務有變化也不恢復自動跟隨 */
+  isHeld: boolean
 }
 
 export type Tab = 'tasks' | 'basic' | 'skill' | 'settings'
