@@ -5,7 +5,7 @@
 
 type RowBase = {
   id: string
-  /** 所屬的組（分組、subagent 群組）；一組延續到下一頁時，下一頁開頭補「<label>（續）」 */
+  /** 所屬的組（分組、subagent 列）；一組延續到下一頁時，下一頁開頭補「<label>（續）」 */
   group?: { id: string; label: string }
   /** 這一行就是組名列 */
   isHeader?: boolean

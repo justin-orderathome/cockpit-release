@@ -21,6 +21,8 @@ import type { Ask } from './ask'
 import { rootedAt, safeFiles, tidy, under } from './files'
 import type { Files } from './files'
 import { composeFill } from './fill'
+import { applyHandled, handledTickets, handlerMarks } from './handled'
+import type { Handled, HandledEvent } from './handled'
 import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
@@ -64,7 +66,7 @@ import type { Press, SwitchState } from './switches'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
 import type { Elements, TabContent, TabContext } from './tab'
-import { EMPTY_BOARD, applyTask, formatDuration, hasRunning, taskCells, taskColumns, timeStamp, viewTasks } from './tasks'
+import { EMPTY_BOARD, agentCells, agentLabels, applyTask, formatDuration, hasRunning, isEnded, taskCells, timeStamp, viewTasks } from './tasks'
 import type { TaskEvent, TaskView } from './tasks'
 import { translateAll } from './translate'
 import type { Translations } from './translate'
@@ -138,6 +140,8 @@ const openEfforts = atom({ plugin: 'cockpit', key: 'openEfforts' } as const, [] 
 /** 路線圖裡手動攤開或收起過的組與「已結案」；只記這個 session，重開回到預設 */
 const roadmapFolds = atom({ plugin: 'cockpit', key: 'roadmapFolds' } as const, {} as Record<string, boolean>)
 const showDoneEfforts = atom({ plugin: 'cockpit', key: 'showDoneEfforts' } as const, false)
+/** 這個 session 經手的票 → 最近一次經手的 loop；只記這個 session，不寫進票檔 */
+const handled = atom({ plugin: 'cockpit', key: 'handled' } as const, {} as Handled)
 /** 上次查到的發布版本，留著的標示看它；'' 是還沒查到過。只有從 marketplace 裝的那一份會寫 */
 const releasedVersion = atom({ plugin: 'cockpit', key: 'releasedVersion' } as const, '')
 /** 已經下載、還沒換上的版本，標示是不是「已下載」看它；'' 是沒有 */
@@ -633,6 +637,35 @@ async function showRoadmap($: EngineInterface, efforts: Effort[]) {
   if (json === shownRoadmap) return
   shownRoadmap = json
   await update($, roadmap, () => efforts)
+  // 結案的票不再算經手
+  await changeHandled($, { kind: 'closed', open: openTickets(efforts) })
+}
+
+// ── 經手 ─────────────────────────────────────────────────
+
+/** 路線圖上還沒結案的票的路徑 */
+const openTickets = (efforts: readonly Effort[]) =>
+  efforts.flatMap(f => [...f.decisions, ...f.builds]).flatMap(t => (t.state === 'done' ? [] : [t.path]))
+
+/** 改經手的紀錄；沒變就不寫（寫了就重畫） */
+async function changeHandled($: EngineInterface, event: HandledEvent) {
+  const before = await read($, handled)
+  const after = applyHandled(before, event)
+  if (after !== before) await update($, handled, () => after)
+}
+
+/**
+ * 某個 loop（主對話沒有 agentId）送出、派工或改檔的文字裡有沒有還沒結案的票：有就算它經手。
+ * 跟票無關的先擋掉，不問引擎任何事。旁觀而已，出錯也不影響原本的事。
+ */
+async function touchTickets($: EngineInterface, text: string, agentId: string | undefined) {
+  try {
+    if (!/\.md\b/i.test(text)) return
+    const open = openTickets(await read($, roadmap))
+    if (open.length === 0) return
+    const tickets = handledTickets(text, open, await projectRoot($))
+    if (tickets.length > 0) await changeHandled($, { kind: 'touched', tickets, agentId })
+  } catch {}
 }
 
 /** [設定] 的「更新紀錄」：用編輯器打開裝著的那一份；這一版沒有那個檔就說沒有。 */
@@ -890,8 +923,8 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
   const head = main.total === 0 ? '' : `${main.doneCount}/${main.total} 完成`
   const headNote =
     main.total === 0
-      ? view.orphanCount > 0
-        ? `${view.orphanCount} 個 subagent 有清單`
+      ? view.agentCount > 0
+        ? `${view.agentCount} 個 subagent`
         : '目前沒有任務'
       : main.doneCount === main.total
         ? ' · 全部完成'
@@ -909,22 +942,35 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
     </Box>
   )
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
+  // 模型標示整塊一起決定完整或縮寫
+  const labels = agentLabels(view, cols)
   const todoRows: Row<JSX.Element>[] = view.rows.map(r => {
     const indent = r.depth * 2
     if (r.kind === 'agent') {
+      // subagent 列：狀態圖示、描述（有清單時帶 done/total）、模型標示、耗時；結束的整列變暗
+      const cells = agentCells(r, cols - indent)
+      const label = labels.get(r.id)
       return {
         id: r.id,
         group: r.group,
         isHeader: true,
+        detail: r.detail,
         value: (
           <Box flexDirection="row" gap={ROW_GAP} paddingLeft={indent}>
-            <Text dimColor>↳</Text>
+            <Text
+              color={cells.color === 'accent' ? accent : cells.color}
+              dimColor={cells.isEnded}
+            >
+              {cells.icon}
+            </Text>
             <Box flexGrow={1} flexShrink={1}>
-              <Text dimColor wrap="truncate-end">
-                {`${r.label} ${r.doneCount}/${r.total}`}
+              <Text dimColor={cells.isEnded} wrap="truncate-end">
+                {cells.title}
               </Text>
             </Box>
-            {taskColumns(cols - indent).showX && (
+            {label !== undefined && <Text dimColor={cells.isEnded}>{label}</Text>}
+            <Text dimColor>{cells.time}</Text>
+            {cells.canDismiss && (
               <Button
                 key={`dismiss-${r.id}`}
                 label="×"
@@ -978,13 +1024,23 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
   })
 
   // ── 路線圖：放在待辦清單上方 ──
-  const [efforts, showDone, open, folds] = await Promise.all([
+  const [efforts, showDone, open, folds, handledNow, taskBoard] = await Promise.all([
     read($, roadmap),
     read($, showDoneEfforts),
     read($, openEfforts),
     read($, roadmapFolds),
+    read($, handled),
+    read($, board),
   ])
-  const road = viewRoadmap(efforts, { open: new Set(open), showDone, width: cols, folds })
+  // 經手的票行尾標經手者的模型；路線圖整個算一塊，和 [任務] 清單分開決定完整或縮寫
+  const road = viewRoadmap(efforts, {
+    open: new Set(open),
+    showDone,
+    width: cols,
+    folds,
+    handled: handlerMarks(handledNow, taskBoard),
+    base: view.base,
+  })
   const ticketIcon = (t: Ticket) =>
     t.state === 'done' ? (
       <Text color="success">✓</Text>
@@ -1072,7 +1128,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
             return {
               id: `ticket/${t.path}`,
               group: effortGroup,
-              detail: t.detail,
+              detail: r.detail,
               value: (
                 <Box flexDirection="row" gap={ROW_GAP} paddingLeft={r.indent}>
                   {ticketIcon(t)}
@@ -1086,6 +1142,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
                     />
                   </Box>
                   {r.waiting && <Text dimColor>{r.waiting}</Text>}
+                  {r.model !== undefined && <Text>{r.model}</Text>}
                 </Box>
               ),
             }
@@ -1919,6 +1976,47 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
   return { actions, actionsWidth, status, statusWidth, rows }
 }
 
+// ── 每個 session 的開場 ──────────────────────────────────
+
+/** /clear 之後隔多久重讀：等引擎換到新的 session id，寫進去的狀態才不會跟著舊的被丟掉 */
+const CLEAR_RELOAD_DELAY = 300
+
+/**
+ * 把一個 session 畫面上要有的資料讀進來：清掉模組裡記著的上個 session 的東西，再重讀全部。
+ * session.start 與 /clear 之後各跑一次（/clear 不會觸發 session.start，`$.state` 卻會清空）。
+ */
+async function loadSession($: EngineInterface) {
+  hasMadeHowtos = false
+  hasFrontmatter = false
+  roadmapDir = undefined
+  dirs.home = undefined
+  dirs.root = undefined
+  // 畫面上的值已經跟著狀態清空了，記著的「上次寫的」不能再拿來省略寫入
+  shownRoadmap = undefined
+  shownUsage = undefined
+  lastEffort = undefined
+  shownTimes = ''
+  missedTranslations.clear()
+  // 上一個 session 留下來的教學狀態不算數
+  await Promise.all([
+    update($, makingTutorial, () => ''),
+    update($, makingHowtos, () => false),
+    update($, tutorialMenu, () => false),
+    // 經手只算這個 session 的
+    update($, handled, () => ({})),
+  ])
+  const { lastTab } = await restoreRemembered($)
+  await update($, tab, () => startTab(config.settings.defaultTab, lastTab))
+
+  void refresh($)
+  void loadUsage($)
+  void loadPrompts($)
+  void loadSkills($)
+  void roadmapChanged($, { kind: 'open' })
+  // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器）
+  syncTicker($, await read($, board))
+}
+
 // ══ 登記 hook 與外框 ══════════════════════════════════════════════════════
 
 const ESTIMATE_PROMPT =
@@ -1931,44 +2029,31 @@ export const register: Register = (on, options) => {
   config.raw = rawValues(options)
 
   on('session.start', async ($, e, next) => {
-    hasMadeHowtos = false
-    hasFrontmatter = false
-    roadmapDir = undefined
-    dirs.home = undefined
-    dirs.root = undefined
-    missedTranslations.clear()
-    // 上一個 session 留下來的教學狀態不算數
-    await Promise.all([
-      update($, makingTutorial, () => ''),
-      update($, makingHowtos, () => false),
-      update($, tutorialMenu, () => false),
-      $.command.register({
-        name: 'cockpit',
-        description: '開啟 cockpit 面板：模型、用量、任務、常用 prompt 與 skill',
-      }),
-    ])
+    await $.command.register({
+      name: 'cockpit',
+      description: '開啟 cockpit 面板：模型、用量、任務、常用 prompt 與 skill',
+    })
     const { settings } = config
     const updater = await updaterOf($)
-    const [{ lastTab }] = await Promise.all([restoreRemembered($), updater.open()])
-    await update($, tab, () => startTab(settings.defaultTab, lastTab))
-
-    void refresh($)
-    void loadUsage($)
-    void loadPrompts($)
-    void loadSkills($)
-    void roadmapChanged($, { kind: 'open' })
+    await Promise.all([loadSession($), updater.open()])
     if (settings.autoOpen) void $.ui.open({ id: PANE, title: TITLE })
     // 發布的版本排在最後、隔一下才去看：上面的事都排出去、面板開出來之後才開始，檢查不擋住面板的顯示
     $.clock.after(STARTUP_CHECK_DELAY, () => void updater.startupCheck())
 
-    // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器）
-    syncTicker($, await read($, board))
     // 有額度資料時，每 60 秒重畫一次 5H 倒數
     $.clock.every(60_000, async () => {
       if ((await read($, usage)).rateLimits.length > 0) await update($, minute, n => n + 1)
     })
 
     return next(e)
+  })
+
+  // /clear 換成新的 session id，`$.state` 跟著清空，但不會再來一次 session.start：
+  // 等舊的 session 收完尾、換到新的之後，自己把畫面上的資料重讀一遍
+  on('session.end', async ($, e, next) => {
+    const ended = await next(e)
+    if (e.reason === 'clear') $.clock.after(CLEAR_RELOAD_DELAY, () => void loadSession($))
+    return ended
   })
 
   on('command.run', { command: 'cockpit' }, async $ => {
@@ -2001,6 +2086,12 @@ export const register: Register = (on, options) => {
         void update($, effort, () => level)
       }
     }
+    // 模型標示：每個 loop 記住最近一次的模型與深度，主對話的是基準；沒變就不寫，免得每一步都重畫
+    try {
+      const step: TaskEvent = { kind: 'step', agentId: e.agentId, model: e.model, effort: e.effort === undefined ? undefined : String(e.effort) }
+      const current = await read($, board)
+      if (applyTask(current, step) !== current) await dispatch($, step)
+    } catch {}
     return yield* next(e)
   })
 
@@ -2036,6 +2127,56 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // subagent 列：派出就建一行（醒來再派出只更新）；teammate 與 workflow 的 agent 不列
+  on('agent.spawn', async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny === undefined && ran.agentId !== undefined && e.isTeammate !== true && e.workflow === undefined) {
+      try {
+        const now = await $.clock.now()
+        await dispatch($, {
+          kind: 'spawned',
+          agentId: ran.agentId,
+          label: e.description,
+          type: e.subagentType,
+          prompt: e.prompt,
+          parentAgentId: e.parentAgentId,
+          model: ran.model,
+          now,
+        })
+      } catch {}
+      // 派工的 prompt 裡有票的路徑：算這個 subagent 經手
+      await touchTickets($, e.prompt, ran.agentId)
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 經手：你送出的 prompt（包括按「繼續」填進去的）裡有票的路徑，算主對話經手。
+  // subagent 回報的通知不算：它的回報常寫著票的路徑，但做的不是主對話
+  on('prompt.submit', async ($, e, next) => {
+    const ran = await next(e)
+    if (!('drop' in ran) && e.origin.kind !== 'task-notification') await touchTickets($, e.text, undefined)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // subagent 的一輪結束：由當下 `$.agent.list()` 的狀態判斷真的結束了沒（等子 agent 回報時是 waiting）
+  on('turn.complete', async ($, e, next) => {
+    const ran = await next(e)
+    const owner = e.agentId
+    if (owner !== undefined) {
+      try {
+        if ((await read($, board)).agents.some(g => g.id === owner)) {
+          const [now, agents] = await Promise.all([$.clock.now(), $.agent.list()])
+          const status = agents.find(a => a.id === owner)?.status
+          await dispatch($, { kind: 'ended', agentId: owner, reason: e.reason, status, now })
+          // 真的結束了（不是在等它派的子 agent）：它經手的票拿掉
+          const row = (await read($, board)).agents.find(g => g.id === owner)
+          if (row !== undefined && isEnded(row)) await changeHandled($, { kind: 'ended', agentId: owner })
+        }
+      } catch {}
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
   // 任務來源二：TaskCreate / TaskUpdate（整個 session 共用一份，只收主對話的）
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
@@ -2058,24 +2199,29 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // 路線圖：把「寫了檔」「跑了 shell 指令」告訴 roadmap，要不要重讀由它決定
+  // 路線圖：把「寫了檔」「跑了 shell 指令」告訴 roadmap，要不要重讀由它決定。
+  // 經手：改了票檔、或指令裡有票的路徑，算發出它的 loop 經手（只讀不算，所以 Read 不接）
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const ran = await next(e)
+    if (succeeded(ran)) await touchTickets($, e.file_path, e.agentId)
     void roadmapChanged($, wroteFile(e.file_path, ran))
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
+    if (succeeded(ran)) await touchTickets($, e.file_path, e.agentId)
     void roadmapChanged($, wroteFile(e.file_path, ran))
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
+    if (ran.deny === undefined) await touchTickets($, e.command, e.agentId)
     void roadmapChanged($, ranShell(ran))
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
     const ran = await next(e)
+    if (ran.deny === undefined) await touchTickets($, e.command, e.agentId)
     void roadmapChanged($, ranShell(ran))
     return ran
   }).catch(($, e, next) => next(e))

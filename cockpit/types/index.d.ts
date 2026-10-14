@@ -21,26 +21,51 @@ export type TaskItem = {
   agentId?: string
 }
 
-/** 一個 subagent 的清單，掛在派出它的那個任務底下 */
-export type AgentGroup = {
+/** subagent 的狀態：進行中（含等它派的子 agent 回報）、完成、被停掉、出錯 */
+export type SubagentState = 'running' | 'done' | 'stopped' | 'failed'
+
+/** [任務] 裡的一行 subagent 列：派出就有，它的清單與它再派出的 subagent 接在底下 */
+export type Subagent = {
+  /** 引擎給的 agentId */
   id: string
   /** 派工時給的簡短描述 */
   label: string
-  /** 第一次看到它的清單時，派出者正在進行的任務；找不到則 undefined */
+  /** 派出時的類型（`general-purpose`、`Explore`…）；從清單補建的列不知道 */
+  type?: string
+  /** 派工 prompt 的開頭幾行 */
+  prompt?: string
+  /** 派出那一刻，派出者正在進行的任務；沒有則 undefined */
   parentTaskId?: string
+  /** 派出它的 subagent；主對話派的為 undefined */
+  parentAgentId?: string
+  /** 舊版存下來的 subagent 列沒有，當作完成 */
+  state?: SubagentState
+  /** 第一次派出的時間（epoch ms）；醒來再派出不重新計時 */
+  startedAt?: number
+  /** 真正結束的時間（epoch ms）；進行中為 undefined */
+  endedAt?: number
+  /** 最近一次 `turn.step` 的模型與深度；第一步之前是 `agent.spawn` 給的模型 */
+  model?: ModelUse
   isDismissed: boolean
 }
+
+/** 一個 loop 在用的模型（完整的 model id）與深度；沒有深度的模型沒有 `effort` */
+export type ModelUse = { model: string; effort?: string }
 
 /** [任務] 的全部狀態，一起更新 */
 export type TaskBoard = {
   /** 這個 session 的任務，依模型寫入的順序 */
   tasks: TaskItem[]
-  /** 出現過清單的 subagent，依先後順序 */
-  agents: AgentGroup[]
+  /** 派出過的 subagent，依第一次派出的順序 */
+  agents: Subagent[]
   /** 是否自動翻到最近開始的進行中任務 */
   isFollowing: boolean
   /** 使用者正在看路線圖（按了「重新載入路線圖」或展開 effort）：任務有變化也不恢復自動跟隨 */
   isHeld: boolean
+  /** 主對話最近一次 `turn.step` 的模型與深度：模型標示「跟主對話比」的基準 */
+  mainModel?: ModelUse
+  /** 還沒派出（`agent.spawn` 還沒寫進來）就先到的 subagent 最近一步的模型與深度：派出時補上 */
+  earlySteps?: Record<string, ModelUse>
 }
 
 export type Tab = 'tasks' | 'basic' | 'skill' | 'settings'
@@ -186,7 +211,7 @@ declare module 'claude-code' {
       alerted: string[]
       /** 每 60 秒跳動一次，讓 5H 倒數重畫 */
       minute: number
-      /** 任務、subagent 群組與跟隨狀態 */
+      /** 任務、subagent 列與跟隨狀態 */
       board: TaskBoard
       /** 每秒跳動一次，讓進行中任務的耗時重畫 */
       tick: number
@@ -223,6 +248,8 @@ declare module 'claude-code' {
       roadmapFolds: Record<string, boolean>
       /** 是否顯示已完成的 effort */
       showDoneEfforts: boolean
+      /** 這個 session 經手的票 → 最近一次經手的 loop（subagent 的 agentId；主對話是 null） */
+      handled: Record<string, string | null>
       /** 上次查到的發布版本，留著的標示看它；'' 表示還沒查到過。也存在 $.store */
       releasedVersion: string
       /** 已經下載、還沒換上的版本，標示是不是「已下載」看它；'' 表示沒有。也存在 $.store */

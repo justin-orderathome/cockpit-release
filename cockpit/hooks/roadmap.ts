@@ -1,7 +1,10 @@
-import type { Effort, EffortStage, Ticket, TicketKind, TicketState } from '../types'
+import type { Effort, EffortStage, ModelUse, Ticket, TicketKind, TicketState } from '../types'
 import { tidy } from './files'
 import type { FileEntry, Files } from './files'
+import type { HandlerMark } from './handled'
 import { ROW_GAP, fitText, foldLabel, textWidth } from './layout'
+import { modelLabels } from './modelLabel'
+import type { LabelSlot } from './modelLabel'
 
 /**
  * 讀目前專案放 effort 的目錄（預設 `.scratch/`）底下的每個 effort，判斷它走到哪、下一步要做什麼。
@@ -378,8 +381,21 @@ export type RoadmapRow =
   | { kind: 'tickets'; effort: Effort; id: string; text: string; foldId: string; isOpen: boolean; indent: number }
   /** 收起來的已結案的票：「▸ 已結案 9」；攤開後這一行還在，票照編號列在後面 */
   | { kind: 'closed'; effort: Effort; id: string; text: string; foldId: string; isOpen: boolean; indent: number }
-  /** 一張票：`label` 是「02 標題」（票號留在前面，才對得上 `waiting` 的「等 01、02」）；要人做的票 `waiting` 是「待人處理」 */
-  | { kind: 'ticket'; effort: Effort; ticket: Ticket; label: string; waiting: string; indent: number }
+  /**
+   * 一張票：`label` 是「02 標題」（票號留在前面，才對得上 `waiting` 的「等 01、02」）；要人做的票 `waiting` 是「待人處理」。
+   * 被這個 session 經手的票：`model` 是行尾補到欄寬的模型標示（主對話經手的、跟主對話相同的、放不下的沒有），
+   * `detail` 是說明區的字，最前面一行寫誰經手
+   */
+  | {
+      kind: 'ticket'
+      effort: Effort
+      ticket: Ticket
+      label: string
+      waiting: string
+      indent: number
+      model?: string
+      detail?: string
+    }
 
 export type RoadmapView = {
   rows: RoadmapRow[]
@@ -401,6 +417,7 @@ const MIN_CLOSED = 2
  * 票多的時候只列還要做的：整組都結案的那組預設收起，其餘的組把已結案的票收成一行。
  * `folds` 是使用者手動攤開（true）或收起（false）過的，鍵是那一行的 `foldId`；沒動過的每次照當下的票算。
  * `width` 是可用的寬度；名稱以外的欄（數字、「繼續」、階段）放不下時，先拿掉階段。
+ * `handled` 是這個 session 經手的票 → 要標的模型與說明區那一行；`base` 是主對話最近一次的模型與深度，和它相同的不標。
  */
 export function viewRoadmap(
   efforts: readonly Effort[],
@@ -409,9 +426,20 @@ export function viewRoadmap(
     showDone,
     width,
     folds = {},
-  }: { open: ReadonlySet<string>; showDone: boolean; width: number; folds?: Readonly<Record<string, boolean>> },
+    handled,
+    base,
+  }: {
+    open: ReadonlySet<string>
+    showDone: boolean
+    width: number
+    folds?: Readonly<Record<string, boolean>>
+    handled?: ReadonlyMap<string, HandlerMark>
+    base?: ModelUse
+  },
 ): RoadmapView {
   const rows: RoadmapRow[] = []
+  /** 每一張列出來的票：在 `rows` 的第幾行、完整的名稱、扣掉標示前名稱有幾格、經手者的模型 */
+  const marked: (LabelSlot & { at: number; label: string })[] = []
   for (const effort of efforts.filter(f => showDone || f.stage !== 'done')) {
     const isOpen = open.has(effort.name)
     // 沒有票（例如只有規格書）就不顯示進度
@@ -470,16 +498,23 @@ export function viewRoadmap(
           ticket.waitingOn.length > 0 ? `等 ${ticket.waitingOn.join('、')}` : ticket.state === 'human' ? '待人處理' : ''
         const room = width - TICKET_INDENT - ICON - (waiting ? textWidth(waiting) + ROW_GAP : 0)
         const label = ticket.number ? `${ticket.number} ${ticket.title}` : ticket.title
-        rows.push({
-          kind: 'ticket',
-          effort,
-          ticket,
-          label: fitText(label, Math.max(4, room)),
-          waiting,
-          indent: TICKET_INDENT,
-        })
+        // 結案的票不標誰經手（經手的紀錄要等路線圖重讀才拿掉）
+        const mark = ticket.state === 'done' ? undefined : handled?.get(ticket.path)
+        const detail = mark === undefined ? ticket.detail : [mark.note, ticket.detail].filter(Boolean).join('\n')
+        marked.push({ at: rows.length, label, room, use: mark?.use })
+        rows.push({ kind: 'ticket', effort, ticket, label, waiting, indent: TICKET_INDENT, detail })
       }
     }
   }
+  // 模型標示整個路線圖算一塊，一起決定完整或縮寫；名稱照扣掉標示後的寬度裁
+  const { labels } = modelLabels(marked, base)
+  marked.forEach(({ at, label, room }, i) => {
+    const row = rows[at]
+    if (row?.kind !== 'ticket') return
+    const model = labels[i]
+    // 標示已經補到同一欄寬
+    const used = model === undefined ? 0 : textWidth(model) + ROW_GAP
+    rows[at] = { ...row, label: fitText(label, Math.max(4, room - used)), model }
+  })
   return { rows, doneCount: efforts.filter(f => f.stage === 'done').length }
 }
