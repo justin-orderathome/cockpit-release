@@ -7,6 +7,7 @@ import type {
   EffortLevel,
   FrontmatterEntry,
   PromptGroup,
+  SkillGroup,
   SkillItem,
   SkillOverrides,
   Tab,
@@ -52,22 +53,68 @@ import {
   wordingFor,
 } from './release'
 import type { Indicator, Install, Verdict } from './release'
-import { justReloaded, startTab, storedList, storedTranslations, storedVersion, toggled, versionChanged } from './remembered'
+import {
+  justReloaded,
+  startTab,
+  storedCategory,
+  storedList,
+  storedTranslations,
+  storedVersion,
+  toggled,
+  versionChanged,
+} from './remembered'
 import { TRACKER_DOC, roadmapWatch, touchesRoadmap, trackerRoot, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
 import {
   EMPTY_OVERRIDES,
   NO_SOURCES,
   SAMPLE_OVERRIDES,
-  filterSkills,
+  categorize,
   groupSkills,
   listedCommands,
   mergeSkillSources,
   parseOverrides,
   parseSkillLock,
+  skillView,
 } from './skills'
 import type { SkillSources } from './skills'
 import { findSkillFile } from './source'
+import {
+  GROUP_STATE_TAIL,
+  GROUP_SWITCH_TAIL,
+  IGNORED_NOTICE,
+  INSTALLED_PLUGINS,
+  LOCAL_SETTINGS,
+  PLUGIN_SWITCH_TAIL,
+  SWITCH_BUTTON,
+  SWITCH_TAIL,
+  TOKENS_TAIL,
+  UNREADABLE_SETTINGS,
+  categoryTitle,
+  disabledPlugins,
+  flipAll,
+  groupPlugin,
+  installedPlugins,
+  isPluginOff,
+  isSkillOff,
+  pluginGroupCount,
+  pluginKey,
+  pluginSkills,
+  pluginToast,
+  readEnabledPlugins,
+  readOverrides,
+  rewriteSettings,
+  skillPlugins,
+  skillTokens,
+  stateLabel,
+  summarize,
+  switchToast,
+  tabLabel,
+  tokensOf,
+  withDisabledPlugins,
+  withIgnoreLine,
+} from './switches'
+import type { SwitchAction, SwitchSummary } from './switches'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
 import type { TabContent, TabContext } from './tab'
@@ -75,7 +122,7 @@ import { EMPTY_BOARD, applyTask, formatDuration, hasRunning, taskCells, taskColu
 import type { TaskEvent, TaskView } from './tasks'
 import { translateAll } from './translate'
 import type { Translations } from './translate'
-import { USAGE_HINT, checkAlerts, chipArea, chipColor, chipParts } from './usage'
+import { USAGE_HINT, checkAlerts, chipArea, chipColor, chipParts, shortTokens } from './usage'
 
 /**
  * 面板裡所有會碰到引擎的程式都在這個檔案，這是引擎的規定：`$` 只能傳給同一個檔案裡宣告的函式，
@@ -122,6 +169,12 @@ const frontmatter = atom({ plugin: 'cockpit', key: 'frontmatter' } as const, [] 
 const overrides = atom({ plugin: 'cockpit', key: 'overrides' } as const, EMPTY_OVERRIDES as SkillOverrides)
 const skillSources = atom({ plugin: 'cockpit', key: 'skillSources' } as const, NO_SOURCES as SkillSources)
 const openSkillGroups = atom({ plugin: 'cockpit', key: 'openSkillGroups' } as const, [] as string[])
+const switchMode = atom({ plugin: 'cockpit', key: 'switchMode' } as const, false)
+const skillSwitches = atom({ plugin: 'cockpit', key: 'skillSwitches' } as const, {} as Record<string, unknown>)
+const pluginSwitches = atom({ plugin: 'cockpit', key: 'pluginSwitches' } as const, {} as Record<string, unknown>)
+const installedPluginKeys = atom({ plugin: 'cockpit', key: 'installedPluginKeys' } as const, [] as string[])
+/** [SKILL] 選中的分類名稱；'' 或已經不存在的分類就看第一個。跨 session 記住 */
+const skillCategory = atom({ plugin: 'cockpit', key: 'skillCategory' } as const, '')
 const search = atom({ plugin: 'cockpit', key: 'search' } as const, '')
 const translations = atom({ plugin: 'cockpit', key: 'translations' } as const, {} as Translations)
 const howtos = atom({ plugin: 'cockpit', key: 'howtos' } as const, {} as Howtos)
@@ -406,11 +459,18 @@ async function loadSkills($: EngineInterface) {
     try {
       const u = await $.session.usage({ breakdown: 'summary' })
       const fm = u.context.breakdown?.skills?.skillFrontmatter ?? []
-      await update($, frontmatter, () => fm.map(f => ({ name: f.name, source: f.source, pluginName: f.pluginName })))
+      await update($, frontmatter, () =>
+        fm.map(f => ({ name: f.name, source: f.source, pluginName: f.pluginName, tokens: f.tokens })),
+      )
       hasFrontmatter = true
     } catch {}
   }
+  // 開關的狀態只看專案的 settings.local.json；每次切到 [SKILL] 都重讀，/skills 選單改的也看得到
+  await loadSwitches($)
   const home = await homeDir($)
+  // plugin 組的開關要用完整的鍵；停用了的 plugin 也靠這份清單畫出它的組
+  const installed = installedPlugins(await files($).read(`${home}/${INSTALLED_PLUGINS}`))
+  await update($, installedPluginKeys, () => installed)
   const text = await files($).read(`${home}/.claude/cockpit/skills.json`)
   await update($, overrides, () => (text === undefined ? EMPTY_OVERRIDES : parseOverrides(text)))
   // 用 npx skills 裝的 skill 從哪裡來；沒用過 npx skills 就沒有這個檔
@@ -429,6 +489,87 @@ async function loadSkills($: EngineInterface) {
       await makeSkillHowtos($, 'auto')
     }
   })()
+}
+
+// ── SKILL 的開關 ─────────────────────────────────────────
+
+/** 讀專案的 settings.local.json，把 skillOverrides 與 enabledPlugins 寫進狀態；回傳讀到的原文（沒有檔是 undefined）。 */
+async function loadSwitches($: EngineInterface): Promise<string | undefined> {
+  const text = await (await projectFiles($)).read(LOCAL_SETTINGS)
+  await showSwitches($, text)
+  return text
+}
+
+async function showSwitches($: EngineInterface, text: string | undefined) {
+  await update($, skillSwitches, () => readOverrides(text))
+  await update($, pluginSwitches, () => readEnabledPlugins(text))
+}
+
+/**
+ * 專案的 git 沒有忽略 settings.local.json 時，加進 repo 本機的忽略清單。
+ * 不是 git repo、git 不能跑或已經忽略了都不做事；這一步失敗不擋開關本身。
+ */
+async function ignoreLocalSettings($: EngineInterface) {
+  const root = await projectRoot($)
+  const cwd = root === undefined ? {} : { cwd: root }
+  try {
+    const checked = await $.process.run(['git', 'check-ignore', '-q', LOCAL_SETTINGS], cwd)
+    // 0：已經忽略；1：沒有忽略；其他（128 是不在 repo 裡）都不動
+    if (checked.exitCode !== 1) return
+    const found = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], cwd)
+    const path = found.stdout.trim()
+    if (found.exitCode !== 0 || path === '') return
+    const exclude = under(root, path)
+    const old = await files($).read(exclude)
+    const next = withIgnoreLine(old)
+    if (next === old) return
+    await files($).write(exclude, next)
+    $.ui.toast(IGNORED_NOTICE)
+  } catch {}
+}
+
+/**
+ * 照一個開關動作改專案的 settings.local.json，重讀狀態並跳提示。`label` 是提示裡的名稱（skill、組或分類）；
+ * `plugins` 是按整個分類時沒動到的 plugin 組有幾個。
+ */
+async function applySwitch($: EngineInterface, action: SwitchAction, label: string, plugins = 0) {
+  const text = await loadSwitches($)
+  const done = rewriteSettings(text, action)
+  if (done.kind === 'unreadable') return void $.ui.toast(UNREADABLE_SETTINGS)
+  if (done.kind === 'write') {
+    try {
+      if (text === undefined) await ignoreLocalSettings($)
+      await (await projectFiles($)).write(LOCAL_SETTINGS, done.text)
+    } catch (err) {
+      return void $.ui.toast(`無法寫入 ${LOCAL_SETTINGS}：${reasonOf(err)}`)
+    }
+    await showSwitches($, done.text)
+  }
+  if (action.kind === 'plugin') {
+    // 設定檔本來就是那個狀態：沒有東西要套用，不代跑 /reload-plugins（它會連 cockpit 一起重新載入）
+    if (done.kind === 'unchanged')
+      return void $.ui.toast(pluginToast({ turn: action.turn, plugin: label, isUnchanged: true }))
+    return applyPlugin($, action.turn, label)
+  }
+  // token 是有數字的那幾個的合計（和組、分類顯示的一樣）；一個都沒有才省略
+  const tokens = tokensOf(action.names, await read($, frontmatter))
+  $.ui.toast(switchToast({ turn: action.turn, label, count: action.names.length, tokens, plugins }))
+}
+
+/**
+ * plugin 的停用／啟用要 `/reload-plugins` 才套用到這個 session（skillOverrides 不用，設定檔會熱重載）。
+ * 代跑之後重讀指令清單：停用的 plugin 的 skill 不見了，組改由停用名單畫出來。
+ * 這會連 cockpit 自己一起重新載入；先跳提示，換上的新那一份照樣讀得到設定檔。
+ */
+async function applyPlugin($: EngineInterface, turn: 'on' | 'off', plugin: string) {
+  let reloadError: string | undefined
+  try {
+    await $.command.run({ command: 'reload-plugins' })
+  } catch (err) {
+    reloadError = reasonOf(err)
+  }
+  $.ui.toast(pluginToast({ turn, plugin, ...(reloadError === undefined ? {} : { reloadError }) }))
+  await loadSkills($)
 }
 
 /**
@@ -779,7 +920,7 @@ async function toggleFold($: EngineInterface, fold: Fold, id: string) {
 async function restoreRemembered(
   $: EngineInterface,
 ): Promise<{ lastTab: unknown; reloadingAt: unknown; seenVersion: unknown }> {
-  const [lastTab, reloadingAt, seenVersion, released, downloaded, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, install] = await Promise.all([
+  const [lastTab, reloadingAt, seenVersion, released, downloaded, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, install, category] = await Promise.all([
     $.store.get('lastTab'),
     $.store.get('reloadingAt'),
     $.store.get('seenVersion'),
@@ -791,6 +932,7 @@ async function restoreRemembered(
     $.store.get('openSkillGroups'),
     $.store.get('closedPromptGroups'),
     installOf($),
+    $.store.get('skillCategory'),
   ])
   await Promise.all([
     // 上次查到的發布版本：沒有重新檢查的這次開場，標示也照它留著；從資料夾載入的不標示
@@ -799,6 +941,7 @@ async function restoreRemembered(
     update($, openEfforts, list => storedList(efforts) ?? list),
     update($, openSkillGroups, list => storedList(skillGroups) ?? list),
     update($, closedPromptGroups, list => storedList(promptGroups) ?? list),
+    update($, skillCategory, () => storedCategory(category)),
     update($, translations, () => storedTranslations(cachedTranslations)),
     // 用法的快取：形狀不對或舊版 prompt 整理的不收
     update($, howtos, () => storedHowtos(cachedHowtos)),
@@ -1324,7 +1467,24 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   const { settings } = config
 
   // 這個分頁要用的狀態一次讀完
-  const [query, known, listed, fm, over, translated, pageName, openIds, isChoosing, isMakingNow, from] = await Promise.all([
+  const [
+    query,
+    known,
+    listed,
+    fm,
+    over,
+    translated,
+    pageName,
+    openIds,
+    isChoosing,
+    isMakingNow,
+    from,
+    chosenCategory,
+    isSwitching,
+    switches,
+    enabledPlugins,
+    installed,
+  ] = await Promise.all([
     read($, search),
     read($, howtos),
     read($, commands),
@@ -1336,15 +1496,26 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     read($, howtoMenu),
     read($, makingHowtos),
     read($, skillSources),
+    read($, skillCategory),
+    read($, switchMode),
+    read($, skillSwitches),
+    read($, pluginSwitches),
+    read($, installedPluginKeys),
   ])
-  const all = skillGroups(
-    listed,
-    fm,
+  // 停用了的 plugin，skill 已經不在清單裡；照樣畫出它的組（空的），才按得到「啟用」
+  const offPlugins = disabledPlugins(enabledPlugins, installed)
+  const all = withDisabledPlugins(
+    skillGroups(
+      listed,
+      fm,
+      over,
+      settings.translate ? translated : NOTHING,
+      // 「整理用法」關掉時當作都沒有用法：沒有「?」、進不了用法頁、搜尋也不比對；存著的用法不動
+      settings.howto ? known : NOTHING,
+      from,
+    ),
+    offPlugins,
     over,
-    settings.translate ? translated : NOTHING,
-    // 「整理用法」關掉時當作都沒有用法：沒有「?」、進不了用法頁、搜尋也不比對；存著的用法不動
-    settings.howto ? known : NOTHING,
-    from,
   )
 
   // ── 用法頁：搜尋框與列表換成一個 skill 的說明與用法 ──
@@ -1447,9 +1618,12 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     return { top: head, rows: pageRows }
   }
 
-  const shownGroups = filterSkills(all, query)
   const open = new Set(openIds)
   const isSearching = query.trim() !== ''
+  // 有分類時一次看選中的那個分類；搜尋時列出所有有符合項目的分類（規則在 skills.ts 的 skillView）
+  const categories = categorize(all, over.categories)
+  const view = skillView(all, categories, chosenCategory, query)
+  const { picked, isHeadOnTop } = view
 
   /** 「更新用法」選了怎麼跑：收起選單再開始 */
   const runHowtos = async (run: HowtoRun) => {
@@ -1457,7 +1631,22 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     await makeSkillHowtos($, run)
   }
 
-  const top = (
+  // 開關模式：o 進出。按鈕一律在固定（不翻頁）的列上，o 在任何捲動位置都有效：
+  // 平常看一個分類時在頂端的分類標題列右邊；沒有分類、或搜尋時（可能列出好幾個分類，也可能一個都沒有）在搜尋列右邊
+  const switchButton = (
+    <Button
+      key="switch-mode"
+      label={isSwitching ? '完成' : '開關'}
+      plain
+      hotkey="o"
+      onPress={() => void update($, switchMode, on => !on)}
+    />
+  )
+
+  // 有用法的 skill，名稱後面多一個「?」，連同前面的間隔佔 2 格
+  const HOWTO_MARK = 2
+
+  const searchRow = (
     <Box key="skill-search-row" flexDirection="row" gap={1}>
       <Button
         key="focus-search"
@@ -1502,11 +1691,168 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             onPress={() => void update($, howtoMenu, () => true)}
           />
         ))}
+      {!isHeadOnTop && switchButton}
     </Box>
   )
 
-  // 有用法的 skill，名稱後面多一個「?」，連同前面的間隔佔 2 格
-  const HOWTO_MARK = 2
+  // plugin 的 skill 沒有單獨的開關，看它的 plugin 有沒有停用（move 混進一般組的也是）；其他的照 skillOverrides 算開或關
+  const plugins = pluginSkills(listed)
+  const owners = skillPlugins(listed)
+  const isOff = (s: SkillItem) => {
+    const owner = owners.get(s.name)
+    return owner === undefined ? isSkillOff(s.name, switches) : isPluginOff(owner, enabledPlugins)
+  }
+  /**
+   * 開關模式裡一個 skill 的那一行：名稱、token 數與 [開]／[關]。
+   * plugin 的 skill 沒有單獨的開關（要停用整個 plugin），行尾只有 token 數。
+   */
+  const switchRow = (s: SkillItem) => {
+    const off = isOff(s)
+    const tokens = skillTokens(s.name, fm)
+    const isPluginSkill = plugins.has(s.name)
+    const tail =
+      isPluginSkill && tokens === undefined ? null : (
+        <Box key={`switch-cell-${s.name}`} flexDirection="row" gap={1} flexShrink={0}>
+          {tokens === undefined ? null : <Text dimColor>{String(tokens)}</Text>}
+          {isPluginSkill ? null : (
+            <Button
+              key={`switch-${s.name}`}
+              label={off ? '關' : '開'}
+              dimColor={off}
+              onPress={() =>
+                void applySwitch($, { kind: 'skills', turn: off ? 'on' : 'off', names: [s.name] }, s.label)
+              }
+            />
+          )}
+        </Box>
+      )
+    const tailWidth = tail === null ? 0 : isPluginSkill ? TOKENS_TAIL : SWITCH_TAIL
+    return (
+      <Box flexDirection="row" paddingLeft={2} gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          {skillButton(s, cols - 2 - tailWidth)}
+        </Box>
+        {tail}
+      </Box>
+    )
+  }
+  // ── 組與分類的開關：不存狀態，由底下可開關（非 plugin）的 skill 算出 ──
+  /** 整組（搜尋時也算整組、整個分類，不只符合的那幾個） */
+  const fullGroups = new Map(all.map(g => [g.id, g]))
+  const fullGroup = (g: SkillGroup) => fullGroups.get(g.id) ?? g
+  /** 底下可開關的 skill */
+  const switchable = (groups: readonly SkillGroup[]) =>
+    groups.flatMap(g => fullGroup(g).items.filter(s => !plugins.has(s.name)).map(s => s.name))
+  const summaryOf = (groups: readonly SkillGroup[]) => summarize(switchable(groups), switches, fm)
+  const fullCategory = (name: string) => categories?.find(c => c.name === name)
+  /** 這一組是哪個 plugin 的 plugin 組；不是 plugin 組（move 開的自訂組、混了一般 skill 的組）是 undefined */
+  const pluginOf = (g: SkillGroup) => groupPlugin(g.id, fullGroup(g).items.map(s => s.name), owners, offPlugins)
+  /**
+   * plugin 組的狀態與開關模式的行尾：狀態看 enabledPlugins；開關寫「plugin 開」／「停用整個 plugin」，和一般的開關看得出不同。
+   * 不是 plugin 組是 undefined；查不到完整的鍵（不在已安裝清單、或是 cockpit 自己）時有狀態、沒有開關。
+   */
+  const pluginSwitchTail = (g: SkillGroup) => {
+    const plugin = pluginOf(g)
+    if (plugin === undefined) return undefined
+    const isGroupOff = isPluginOff(plugin, enabledPlugins)
+    const key = pluginKey(plugin, installed)
+    if (key === undefined) return { isOff: isGroupOff, tail: null }
+    const tokens = isGroupOff ? undefined : tokensOf(fullGroup(g).items.map(s => s.name), fm)
+    const tail = (
+      <Box key={`plugin-switch-${g.id}-tail`} flexDirection="row" gap={1} flexShrink={0}>
+        {tokens === undefined ? null : <Text dimColor>{shortTokens(tokens)}</Text>}
+        <Button
+          key={`plugin-switch-${g.id}`}
+          label={isGroupOff ? '停用整個 plugin' : 'plugin 開'}
+          dimColor={isGroupOff}
+          onPress={() => void applySwitch($, { kind: 'plugin', turn: isGroupOff ? 'on' : 'off', key }, plugin)}
+        />
+      </Box>
+    )
+    return { isOff: isGroupOff, tail }
+  }
+  /** 一組或一個分類行尾的 token 數與開關；沒有可開關的 skill 時沒有 */
+  const batchTail = (key: string, summary: SwitchSummary, onPress: () => void) =>
+    summary.state === undefined ? null : (
+      <Box key={`${key}-tail`} flexDirection="row" gap={1} flexShrink={0}>
+        {summary.tokens === undefined ? null : <Text dimColor>{shortTokens(summary.tokens)}</Text>}
+        <Button key={key} label={stateLabel(summary.state)} dimColor={summary.state !== 'on'} onPress={onPress} />
+      </Box>
+    )
+  /** 按組或分類的開關：開或部分就把開著的全部關掉，關就全部打開 */
+  const flipBatch = (groups: readonly SkillGroup[], label: string, pluginGroups = 0) => {
+    const action = flipAll(switchable(groups), switches)
+    if (action !== undefined) void applySwitch($, action, label, pluginGroups)
+  }
+  /** 開關模式裡「整個分類」那一列；分類裡沒有可開關的 skill（只有 plugin 組）時沒有這一列 */
+  const categorySwitchRow = (name: string): Row<JSX.Element> | undefined => {
+    const c = fullCategory(name)
+    if (c === undefined) return undefined
+    const tail = batchTail(`category-switch-${name}`, summaryOf(c.groups), () =>
+      flipBatch(c.groups, name, pluginGroupCount(c.groups, owners, offPlugins)),
+    )
+    if (tail === null) return undefined
+    return {
+      id: `skill-category-switch-${name}`,
+      value: (
+        <Box key={`category-switch-row-${name}`} flexDirection="row" gap={1}>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text>整個分類</Text>
+          </Box>
+          {tail}
+        </Box>
+      ),
+    }
+  }
+  /** 分類的標題列：`<分類>：<開的數>/<總數> 開 · <N> tokens`；在頂端的那一列右邊是開關模式的按鈕 */
+  const categoryHead = (name: string, isOnTop: boolean) => {
+    const c = fullCategory(name)
+    const title = categoryTitle(name, c === undefined ? { on: 0, total: 0 } : summaryOf(c.groups))
+    return (
+      <Box key={`skill-cat-head-${name}`} flexDirection="row" gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text bold>
+            {fitText(title, isOnTop ? cols - SWITCH_BUTTON : cols)}
+          </Text>
+        </Box>
+        {isOnTop && switchButton}
+      </Box>
+    )
+  }
+
+  /** 點分類分頁籤：換成那個分類，存起來下次開還停在這裡 */
+  const pickCategory = async (name: string) => {
+    await update($, skillCategory, () => name)
+    await $.store.set('skillCategory', name)
+  }
+  // 有分類時搜尋列下方多一排分類分頁籤，照寫的順序，「未分類」在最後；整個分類關掉或部分關掉時標「·關」「·部分」。
+  // 平常看一個分類時，它的標題列也固定在頂端（不跟著翻頁），開關模式的按鈕在那一列
+  const top =
+    categories === undefined ? (
+      searchRow
+    ) : (
+      <Box key="skill-top" flexDirection="column">
+        {searchRow}
+        <Box key="skill-categories" flexDirection="row" gap={1}>
+          {categories.map(c => {
+            const label = tabLabel(c.name, summaryOf(c.groups).state)
+            return (
+              <Button key={`skill-cat-${c.name}`} label={label} plain onPress={() => void pickCategory(c.name)}>
+                {c === picked ? (
+                  <Text color={accent} bold>
+                    [{label}]
+                  </Text>
+                ) : (
+                  <Text> {label} </Text>
+                )}
+              </Button>
+            )
+          })}
+        </Box>
+        {isHeadOnTop && picked !== undefined && categoryHead(picked.name, true)}
+      </Box>
+    )
+
   /** 一個 skill 的按鈕；名稱（有用法時連同「?」）裁到 `room` 格以內。點名稱填入，點「?」開用法頁 */
   const skillButton = (s: SkillItem, room: number) => {
     const name = (
@@ -1514,6 +1860,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         key={`skill-btn-${s.name}`}
         label={fitText(s.label, s.howto ? room - HOWTO_MARK : room)}
         plain
+        // 關掉的 skill 變暗，照樣點了填入
+        dimColor={isOff(s)}
         onPress={() => void fillPrompt($, `/${s.name} `, s.label)}
       />
     )
@@ -1538,23 +1886,63 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         : undefined
 
   const rows: Row<JSX.Element>[] = []
-  for (const g of shownGroups) {
-    const isOpen = isSearching || open.has(g.id)
+  for (const g of view.groups) {
+    // 分類的第一組前面是分類的標題列（平常看一個分類時它固定在頂端，這裡不再畫），開關模式再多一列「整個分類」
+    const category = view.before.get(g.id)
+    if (category !== undefined) {
+      if (!isHeadOnTop) rows.push({ id: `skill-category-${category}`, value: categoryHead(category, false) })
+      const whole = isSwitching ? categorySwitchRow(category) : undefined
+      if (whole !== undefined) rows.push(whole)
+    }
+    // 搜尋時與開關模式裡，組都自動展開
+    const isOpen = isSearching || isSwitching || open.has(g.id)
     const group = { id: g.id, label: g.title }
+    // plugin 組（底下全是同一個 plugin 的 skill，或停用後空了的）的開關是停用整個 plugin；其他組照 skill 算
+    const pluginTail = pluginSwitchTail(g)
+    const summary: SwitchSummary =
+      pluginTail === undefined ? summaryOf([g]) : { on: 0, total: 0, state: pluginTail.isOff ? 'off' : 'on' }
+    // 開關模式：行尾是 token 數與開關；平常模式：整組或部分關掉的組名變暗、行尾標「已關」「部分關」
+    const tail = isSwitching
+      ? pluginTail !== undefined
+        ? pluginTail.tail
+        : batchTail(`group-switch-${g.id}`, summary, () => flipBatch([g], g.title))
+      : summary.state === 'off' || summary.state === 'partial' ? (
+          <Box key={`group-state-${g.id}`} flexShrink={0}>
+            <Text dimColor>{summary.state === 'off' ? '已關' : '部分關'}</Text>
+          </Box>
+        ) : null
+    const switchTailWidth = pluginTail?.tail ? PLUGIN_SWITCH_TAIL : GROUP_SWITCH_TAIL
+    const groupTailWidth = tail === null ? 0 : isSwitching ? switchTailWidth : GROUP_STATE_TAIL
     rows.push({
       id: `skill-group-${g.id}`,
       group,
       isHeader: true,
       value: (
-        <Button
-          key={`sg-btn-${g.id}`}
-          label={fitText(foldLabel(isOpen, `${g.title} (${g.items.length})`), cols)}
-          plain
-          onPress={() => void toggleFold($, 'openSkillGroups', g.id)}
-        />
+        <Box key={`sg-row-${g.id}`} flexDirection="row" gap={1}>
+          <Box flexGrow={1} flexShrink={1}>
+            <Button
+              key={`sg-btn-${g.id}`}
+              // 停用的 plugin 組是空的（skill 已經不在清單裡），不寫個數
+              label={fitText(
+                foldLabel(isOpen, g.items.length === 0 ? g.title : `${g.title} (${g.items.length})`),
+                cols - groupTailWidth,
+              )}
+              plain
+              dimColor={!isSwitching && tail !== null}
+              onPress={() => void toggleFold($, 'openSkillGroups', g.id)}
+            />
+          </Box>
+          {tail === null ? null : <Box key={`group-tail-${g.id}`} flexShrink={0}>{tail}</Box>}
+        </Box>
       ),
     })
     if (!isOpen) continue
+    // 開關模式：每個 skill 一行，行尾是 token 數與開關（plugin 的 skill 只有 token 數）
+    if (isSwitching) {
+      for (const s of g.items)
+        rows.push({ id: `skill-${s.name}`, group, detail: s.description, detailHint: howtoHint(s), value: switchRow(s) })
+      continue
+    }
     if (settings.skillLayout === 'grid') {
       // 橫向：排成等寬的幾欄，每一格各有自己的說明
       rows.push(
@@ -1581,7 +1969,12 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     }
   }
 
-  return { top, rows, emptyText: isSearching ? '沒有符合的 skill' : '讀取中…' }
+  return {
+    top,
+    topRows: view.topRows,
+    rows,
+    emptyText: isSearching ? '沒有符合的 skill' : '讀取中…',
+  }
 }
 
 /** 標籤補到一樣寬（按顯示的格數，不是字數），下拉選單才會對齊 */
@@ -2010,7 +2403,7 @@ export const register: Register = (on, options) => {
       isTabsOnBorder,
       isInline: e.props.placement === 'inline',
       inlineRows: settings.inlineRows,
-      fixedRows: (content.top ? 1 : 0) + (content.bottom ? 1 : 0),
+      fixedRows: (content.top ? (content.topRows ?? 1) : 0) + (content.bottom ? 1 : 0),
       page: allPages[currentTab],
       followId: content.followId,
     })

@@ -20,6 +20,8 @@ export type TabContext = {
  */
 export type TabContent = {
   top?: JSX.Element
+  /** `top` 佔幾行；不給就是一行（[SKILL] 有分類時多一排分頁籤） */
+  topRows?: number
   bottom?: JSX.Element
   rows: Row<JSX.Element>[]
   /** 一行都沒有時顯示的話 */

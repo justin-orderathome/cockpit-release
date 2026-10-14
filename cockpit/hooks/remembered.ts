@@ -9,6 +9,7 @@ import type { Translations } from './translate'
  *
  * `$.store` 的鍵（全部）：
  * - `openEfforts`、`openSkillGroups`、`closedPromptGroups`：收合狀態，字串清單。
+ * - `skillCategory`：[SKILL] 選中的分類名稱，字串；不是字串當作沒選（看第一個分類）。
  * - `lastTab`：上次停在哪個分頁（[設定] 不記）。
  * - `translations`、`howtos`：模型產生的快取（`howtos` 的驗證在 `howto.ts`）。
  * - `reloadingAt`：按「重新載入 mod」的時間，給重載後的那一份回報用。
@@ -33,6 +34,9 @@ const isText = (v: unknown): v is string => typeof v === 'string'
 
 /** 存起來的版本號（`releasedVersion`、`downloadedVersion`）；沒存過或形狀不對是空的，就是沒有 */
 export const storedVersion = (value: unknown): string => (isText(value) ? value : '')
+
+/** 存起來的 [SKILL] 分類名稱；不是字串是空的，就是沒選（看第一個分類） */
+export const storedCategory = (value: unknown): string => (isText(value) ? value : '')
 
 /** 存起來的翻譯；形狀不對的整筆丟掉，下次再翻 */
 export function storedTranslations(value: unknown): Translations {

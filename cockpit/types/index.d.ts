@@ -152,13 +152,21 @@ export type SkillOverrides = {
   hidden: string[]
   /** 手動指定 skill 放哪一組：完整名稱或結尾 `*` 的前綴 → 組的 id */
   move: Record<string, string>
+  /** 分類：分類名稱（也是顯示名稱）→ 組 id，都照寫的順序 */
+  categories: Record<string, string[]>
 }
 
 /** $.command.list() 的一筆，只取用得到的欄位 */
 export type CommandEntry = { name: string; description: string; source: string; plugin?: string }
 
 /** skillFrontmatter 的一筆，只取用得到的欄位 */
-export type FrontmatterEntry = { name: string; source: string; pluginName?: string }
+export type FrontmatterEntry = {
+  name: string
+  source: string
+  pluginName?: string
+  /** 這個 skill 在模型清單裡佔的 token（估計值）；明細沒給就沒有 */
+  tokens?: number
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -194,6 +202,16 @@ declare module 'claude-code' {
       skillSources: Record<string, string>
       /** 展開的 [SKILL] 組 id（預設收合） */
       openSkillGroups: string[]
+      /** [SKILL] 在開關模式（按 o 進出；不跨 session） */
+      switchMode: boolean
+      /** 目前專案 `.claude/settings.local.json` 的 `skillOverrides`；切到 [SKILL] 時重讀 */
+      skillSwitches: Record<string, unknown>
+      /** 目前專案 `.claude/settings.local.json` 的 `enabledPlugins`；和 `skillSwitches` 一起重讀 */
+      pluginSwitches: Record<string, unknown>
+      /** 已安裝 plugin 的完整鍵 `<plugin>@<marketplace>`（取自 `~/.claude/plugins/installed_plugins.json`）；切到 [SKILL] 時重讀 */
+      installedPluginKeys: string[]
+      /** [SKILL] 選中的分類名稱；'' 是沒選過（看第一個分類） */
+      skillCategory: string
       search: string
       /** 目前專案的 effort，最近修改的在前 */
       roadmap: Effort[]

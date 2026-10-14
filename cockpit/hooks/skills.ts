@@ -7,7 +7,13 @@ import type { Translations } from './translate'
 export const MY_SKILLS = 'my-skills'
 export const BUILTIN_SKILLS = 'builtin-skills'
 
-export const EMPTY_OVERRIDES: SkillOverrides = { groups: {}, descriptions: {}, hidden: [], move: {} }
+export const EMPTY_OVERRIDES: SkillOverrides = { groups: {}, descriptions: {}, hidden: [], move: {}, categories: {} }
+
+/** 沒歸到任何分類的組放的地方，名稱固定 */
+export const UNCATEGORIZED = '未分類'
+
+/** [SKILL] 的一個分類：名稱與底下的組 */
+export type SkillCategory = { name: string; groups: SkillGroup[] }
 
 /** 用 `npx skills add` 裝的 skill（全域或專案裡）從哪個 repo 來：skill 名稱 → `owner/repo` */
 export type SkillSources = Record<string, string>
@@ -141,6 +147,79 @@ export function filterSkills(groups: readonly SkillGroup[], query: string): Skil
     .filter(g => g.items.length > 0)
 }
 
+/**
+ * 把分好（含 `move`）的組歸進分類：分類照寫的順序，分類裡的組照寫的順序；沒歸到的組照原本的順序放在最後的「未分類」。
+ * 一個組只屬一個分類（先寫的算數），不存在的組 id 略過，一個組都沒有的分類不出現。
+ * 沒有任何有效分類時是 `undefined`：沒有分類層，畫面和沒寫 `categories` 一樣。
+ * 使用者自己寫了叫「未分類」的分類時略過它，免得和固定的那個撞名。
+ */
+export function categorize(
+  groups: readonly SkillGroup[],
+  categories: SkillOverrides['categories'],
+): SkillCategory[] | undefined {
+  const byId = new Map(groups.map(g => [g.id, g]))
+  const taken = new Set<string>()
+  const result: SkillCategory[] = []
+  for (const [name, ids] of Object.entries(categories)) {
+    if (name === UNCATEGORIZED) continue
+    const own: SkillGroup[] = []
+    for (const id of ids) {
+      const g = byId.get(id)
+      if (g === undefined || taken.has(id)) continue
+      taken.add(id)
+      own.push(g)
+    }
+    if (own.length > 0) result.push({ name, groups: own })
+  }
+  if (result.length === 0) return undefined
+  const rest = groups.filter(g => !taken.has(g.id))
+  if (rest.length > 0) result.push({ name: UNCATEGORIZED, groups: rest })
+  return result
+}
+
+/** 搜尋時的分類：每個分類只留有符合項目的組，沒有符合的分類拿掉。 */
+export const filterCategories = (categories: readonly SkillCategory[], query: string): SkillCategory[] =>
+  categories.map(c => ({ ...c, groups: filterSkills(c.groups, query) })).filter(c => c.groups.length > 0)
+
+/** [SKILL] 這一次要顯示的東西：哪幾組、哪個分類標在分頁籤上、分類標題列畫在哪、頂端佔幾行 */
+export type SkillView = {
+  /** 分頁籤上選中的分類；沒有分類時沒有 */
+  picked?: SkillCategory
+  /** 列表裡的組，照顯示的順序 */
+  groups: SkillGroup[]
+  /** 組 id → 排在它前面的分類標題（只有列出的每個分類的第一組有） */
+  before: Map<string, string>
+  /** 選中分類的標題列固定在頂端（平常看一個分類時）；否則標題列跟著列表 */
+  isHeadOnTop: boolean
+  /** 頂端固定的行數：搜尋列；有分類時加分頁籤；標題列在頂端時再加一行 */
+  topRows: number
+}
+
+/**
+ * [SKILL] 顯示哪些組。有分類時一次看選中的那個分類（沒選過或已經不在了就看第一個）；
+ * 搜尋時列出所有有符合項目的分類。沒有分類時照搜尋篩全部的組。
+ */
+export function skillView(
+  all: readonly SkillGroup[],
+  categories: readonly SkillCategory[] | undefined,
+  chosen: string,
+  query: string,
+): SkillView {
+  if (categories === undefined)
+    return { groups: filterSkills(all, query), before: new Map(), isHeadOnTop: false, topRows: 1 }
+  const isSearching = query.trim() !== ''
+  const picked = categories.find(c => c.name === chosen) ?? categories[0]
+  const shown = isSearching ? filterCategories(categories, query) : picked ? [picked] : []
+  const isHeadOnTop = !isSearching && picked !== undefined
+  return {
+    ...(picked === undefined ? {} : { picked }),
+    groups: shown.flatMap(c => c.groups),
+    before: new Map(shown.flatMap(c => (c.groups[0] ? [[c.groups[0].id, c.name] as const] : []))),
+    isHeadOnTop,
+    topRows: isHeadOnTop ? 3 : 2,
+  }
+}
+
 /** 讀 skills.json；格式不對的部分當作沒寫。 */
 export function parseOverrides(text: string): SkillOverrides {
   let data: unknown
@@ -153,12 +232,22 @@ export function parseOverrides(text: string): SkillOverrides {
     v !== null && typeof v === 'object' && !Array.isArray(v)
       ? Object.fromEntries(Object.entries(v).filter((p): p is [string, string] => typeof p[1] === 'string'))
       : {}
+  // 值是字串陣列的鍵（categories）：值不是陣列的鍵略過，陣列裡不是字串的項目丟掉
+  const lists = (v: unknown): Record<string, string[]> =>
+    v !== null && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.entries(v)
+            .filter((p): p is [string, unknown[]] => Array.isArray(p[1]))
+            .map(([k, list]) => [k, list.filter((x): x is string => typeof x === 'string')]),
+        )
+      : {}
   const d = data !== null && typeof data === 'object' ? (data as Record<string, unknown>) : {}
   return {
     groups: obj(d.groups),
     descriptions: obj(d.descriptions),
     hidden: Array.isArray(d.hidden) ? d.hidden.filter((h): h is string => typeof h === 'string') : [],
     move: obj(d.move),
+    categories: lists(d.categories),
   }
 }
 
@@ -202,7 +291,7 @@ export function mergeSkillSources(globalSources: SkillSources, projects: readonl
 export const SAMPLE_OVERRIDES = `{
   "說明": [
     "這個檔決定 cockpit 的 [SKILL] 怎麼分組與顯示。存檔後切到別的分頁再切回 [SKILL] 就生效。",
-    "這一段只是說明，cockpit 不讀；不需要可以整段刪掉。下面四個鍵都可以省略。",
+    "這一段只是說明，cockpit 不讀；不需要可以整段刪掉。下面五個鍵都可以省略。",
     "",
     "groups：幫整組改名。鍵是組的 id（plugin 名稱、來源的 owner/repo、move 開的自訂組，或 my-skills、builtin-skills），值是顯示的組名。",
     "  例：\\"groups\\": { \\"mattpocock-skills\\": \\"mattpocock\\", \\"emilkowalski/skills\\": \\"emil\\" }",
@@ -215,11 +304,16 @@ export const SAMPLE_OVERRIDES = `{
     "",
     "move：把 skill 移到指定的組。鍵是 skill 的完整名稱，結尾可以加一個 * 比對開頭相同的；值是組的 id，和現有的組同名就併進去，否則開一個自訂組。",
     "  例：\\"move\\": { \\"gitnexus-*\\": \\"gitnexus\\", \\"show-me\\": \\"emilkowalski/skills\\", \\"mattpocock-skills:grilling\\": \\"常用\\" }",
-    "  完整名稱優先於 *；符合多個 * 時取最長的。單獨列在 hidden 的 skill 移到哪都照樣藏著，整組藏掉時移出去的會在新組出現。"
+    "  完整名稱優先於 *；符合多個 * 時取最長的。單獨列在 hidden 的 skill 移到哪都照樣藏著，整組藏掉時移出去的會在新組出現。",
+    "",
+    "categories：把組歸進分類，[SKILL] 的搜尋列下方會出現一排分類分頁籤，一次看一個分類。鍵是分類名稱（就是顯示的名稱），值是組 id 的陣列（move 之後的 id，自訂組也行）。",
+    "  例：\\"categories\\": { \\"專案\\": [\\"mattpocock-skills\\"], \\"介面\\": [\\"emilkowalski/skills\\", \\"impeccable\\"], \\"工具\\": [\\"gitnexus\\", \\"builtin-skills\\"] }",
+    "  分類與分類裡的組都照寫的順序；沒寫到的組集中在最後的「未分類」。同一組寫在兩個分類時只算第一個，不存在的組 id 略過。hidden 不收分類名稱。"
   ],
   "groups": { "mattpocock-skills": "mattpocock" },
   "descriptions": {},
   "hidden": [],
-  "move": {}
+  "move": {},
+  "categories": {}
 }
 `

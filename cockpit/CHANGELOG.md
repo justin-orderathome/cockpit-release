@@ -2,6 +2,11 @@
 
 每一版改了什麼，新的在最上面。
 
+## 0.7.0
+
+- [SKILL] 可以把組歸進自己定義的分類（例如「專案」「介面」「工具」）：在 [設定] 按「編輯 SKILL 覆寫」，在 `categories` 裡寫。寫了之後搜尋列下方多一排分類分頁籤，一次看一個分類；沒寫的話畫面和以前一樣。
+- [SKILL] 按 `o` 進開關模式，可以把單一 skill 從模型看到的 skill 清單拿掉：模型當下就叫不到它，你仍然可以自己打 `/名稱`，清單的 token 從下一個 session 起省下來。也可以一次關掉整組或整個分類，分類、組、skill 都標出佔多少 token，看得出關哪個最划算。關掉的 skill 與組在平常模式變暗。開關只影響目前這個專案，存在專案的 `.claude/settings.local.json`，和 Claude Code 的 `/skills` 選單共用同一份設定。plugin 的 skill 不能單獨關，plugin 組的開關改成在這個專案停用整個 plugin（連它的指令、hook、agent 一起停），按下去 cockpit 會代你跑 `/reload-plugins`。
+
 ## 0.6.5
 
 - [SKILL] 裡用 `npx skills add` 裝的 skill，依它們來自哪個 repo 自成一組，不再全部擠在「我的 skill」。

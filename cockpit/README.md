@@ -35,7 +35,7 @@ Claude Code 的右側面板 mod。上方的「狀態」框顯示用量、目前�
 | --- | --- |
 | **任務** | TodoWrite 與 TaskCreate／TaskUpdate 的任務清單。每列有耗時或剩餘時間，進行中的那一列另外畫進度條與百分比，超時時時間變紅；subagent 的清單掛在派出它的任務底下。會自動翻到最近開始的進行中任務。上方的「路線圖」列出本專案每個 effort 的階段與進度（見下方說明） |
 | **基本** | 常用 prompt，讀自 `~/.claude/cockpit/prompts.md`。點了填進輸入框，名稱結尾標 ` !` 的會直接送出。列上只顯示名稱，滑鼠移到項目上，列表下方的說明區會顯示完整內容 |
-| **SKILL** | 已安裝的 skill，依 plugin 分組；用 `npx skills add` 裝的依來源（`owner/repo`）分組，另有「我的 skill」「內建 skill」兩組（見下方說明）；頂端有搜尋框。點了把 `/<skill 名稱> ` 填進輸入框。一組裡的 skill 名稱橫向排成等寬的幾欄，欄數隨面板寬度變（1–5 欄，每欄至少 18 格），由上到下排滿一欄再換右邊一欄，比一欄還寬的名稱多佔一欄（可在 [設定] 改回一個一行）；滑鼠移到名稱上，列表下方的說明區會顯示完整說明。說明會自動翻成繁體中文。cockpit 還會讀每個 skill 的 SKILL.md，整理成四項用法（何時用、怎麼叫、會做什麼、搭配）：有用法的 skill 名稱後面多一個 `?`，點了把列表換成用法頁，上面是說明與用法的全文，可以直接填入或返回（見下方說明）。用法頁上還可以按「教學」，讓 cockpit 把這個 skill 寫成一份詳細的繁體中文教學，在編輯器裡打開（見下方說明） |
+| **SKILL** | 已安裝的 skill，依 plugin 分組；用 `npx skills add` 裝的依來源（`owner/repo`）分組，另有「我的 skill」「內建 skill」兩組（見下方說明）；頂端有搜尋框；在「SKILL 覆寫」寫了 `categories` 時，搜尋框下方多一排分類分頁籤，一次看一個分類。點了把 `/<skill 名稱> ` 填進輸入框。一組裡的 skill 名稱橫向排成等寬的幾欄，欄數隨面板寬度變（1–5 欄，每欄至少 18 格），由上到下排滿一欄再換右邊一欄，比一欄還寬的名稱多佔一欄（可在 [設定] 改回一個一行）；滑鼠移到名稱上，列表下方的說明區會顯示完整說明。說明會自動翻成繁體中文。cockpit 還會讀每個 skill 的 SKILL.md，整理成四項用法（何時用、怎麼叫、會做什麼、搭配）：有用法的 skill 名稱後面多一個 `?`，點了把列表換成用法頁，上面是說明與用法的全文，可以直接填入或返回（見下方說明）。用法頁上還可以按「教學」，讓 cockpit 把這個 skill 寫成一份詳細的繁體中文教學，在編輯器裡打開（見下方說明）。按 `o` 進開關模式，可以把單一 skill、整組或整個分類從模型的清單拿掉，並看到各佔多少 token（見下方說明），關掉的 skill 與組在列表裡變暗 |
 | **設定** | 強調色、用量門檻、自動開啟等參數 |
 
 放不下時，下方會自己分頁，翻頁鍵嵌在下框線的右端（`k: 上頁  2/5  j: 下頁`），上方的「狀態」框會一直留在畫面上。面板太窄、分頁列放不上框線時，分頁列會退回框上方的一行。
@@ -56,6 +56,17 @@ Claude Code 的右側面板 mod。上方的「狀態」框顯示用量、目前�
 **effort 放在哪**：照專案的 `docs/agents/issue-tracker.md`（寫票的 skill 也看這份），取裡面第一個 `<目錄>/<effort>/` 這種路徑的目錄，例如寫 `docs/efforts/<effort>/map.md` 就讀 `docs/efforts/`。沒有這份文件或認不出路徑時讀 `.scratch/`；文件標題寫明是 GitHub、GitLab、Linear、Jira 這類線上的 tracker 時不顯示路線圖。目錄一律從專案根目錄找，shell `cd` 到別處不影響。
 
 **用 `npx skills` 裝的 skill**（[SKILL]）：`npx skills add <owner/repo> -g` 把 skill 一個一個放進 `~/.claude/skills/`，Claude Code 看到的是一個個個人 skill，不知道它們是同一包。cockpit 讀 `npx skills` 記下的 `~/.agents/.skill-lock.json`，把查得到來源的 skill 依來源分組，例如 `emilkowalski/skills` 一組；只有一個 skill 的來源也自成一組。來源組和 plugin 組一起照字母排，組名可以在「SKILL 覆寫」改短。查不到來源的（自己寫的、claude.ai 同步的、其他工具裝的）留在「我的 skill」；沒有這個檔或讀不懂時，全部照舊在「我的 skill」。比對只看 skill 名稱，lock 檔跟著 skill 清單一起重讀（裝了新的 skill 後 `/reload-plugins` 或重開）。裝在專案裡的（不加 `-g`）也一樣分組：來源記在專案根目錄的 `skills-lock.json`，cockpit 一併讀進來；同一個 skill 全域和專案裡都有記錄時，照全域的來源，因為同名時生效的是使用者層那一份。
+
+**開關**（[SKILL]）：每個 skill 的名稱與說明都會放進模型看到的 skill 清單，每次對話都要付這份 token，相近的 skill 多了模型也容易叫錯。按 `o`（或點「開關」：平常看一個分類時在頂端的分類標題列右邊，沒有分類或正在搜尋時在搜尋列右邊；`o` 在任何一頁都有效）進開關模式：組全部展開，每個 skill 一行，行尾是它在清單裡佔的 token 數（估計值，取自用量明細；沒列進清單的沒有數字）與 `[ 開 ]`／`[ 關 ]`；再按 `o` 或點「完成」回到平常的樣子。
+
+- **整組、整個分類**：開關模式裡每組的行尾是那組開著的 skill 的 token 合計與組的開關；有分類時，分類標題列下面多一列「整個分類」與它的開關。組與分類的開關不另外記，由底下的 skill 算出：全開是 `[ 開 ]`、全關是 `[ 關 ]`、其餘是 `[ 部分 ]`。按下去時，開或部分就把開著的全部關掉，關就全部打開，一次寫進 `skillOverrides` 的好幾個鍵；整組關掉後再單獨打開一個，組就顯示「部分」。提示寫明名稱、關了（或開了）幾個 skill 與 token 數。分類只算非 plugin 的 skill：整個分類的開關不停用 plugin，分類裡有 plugin 組（含停用後空了的）時，關掉後的提示會說「另有 N 個 plugin 組沒動，要停用請按該組」。
+- **token 數**：分類標題列寫 `<分類>：<開的數>/<總數> 開 · <N> tokens`，不進開關模式也看得到；N 是開著的 skill 的合計，看得出關哪個最划算。不在用量明細裡的 skill 不算進去，一個都不在時不寫 token。
+- **關掉之後**：模型當下就叫不到它，你仍然可以自己打 `/名稱` 叫用。清單的 token 要從下一個 session 起才省下來，這個 session 已經送出的清單與已經載入的內容不受影響；按完會跳提示說明這幾件事。
+- **平常模式**：關掉的 skill 照樣列出、搜得到、點了照樣填入，只是變暗。整組或部分關掉的組，組名變暗、行尾標「已關」「部分關」；整個分類關掉或部分關掉時，分類分頁籤加「·關」「·部分」。
+- **存在哪裡**：目前專案的 `.claude/settings.local.json` 的 `skillOverrides`，關寫 `"user-invocable-only"`、開就刪掉那個鍵；檔案裡其他設定原樣保留。這和 Claude Code 的 `/skills` 選單是同一份設定，兩邊改的互相看得到（在 `/skills` 改過之後，切到別的分頁再切回 [SKILL] 就會重讀）；值不是 `"on"` 的都算關。開關只影響這個專案，新的專案預設全開。檔案不是合法的 JSON 時 cockpit 不寫，跳提示請你自己檢查。
+- **不進版控**：`settings.local.json` 是個人設定。cockpit 第一次建立這個檔時，若專案的 git 沒有忽略它，會把 `**/.claude/settings.local.json` 加進這個 repo 本機的忽略清單（`.git/info/exclude`，不改要 commit 的 `.gitignore`），並跳提示。
+- **plugin 的 skill 沒有單獨的開關**：Claude Code 的 `skillOverrides` 管不到 plugin，只能整個停用 plugin。claude.ai 同步的 skill 可以單獨關。
+- **停用整個 plugin**：開關模式裡，plugin 組（照來源分組替那個 plugin 開的組，底下全是它的 skill）的行尾是 `[ plugin 開 ]`，停用後是 `[ 停用整個 plugin ]`，和一般的開關看得出不同；裡面的 skill 一樣一個一行、行尾是 token 數，但沒有開關。按下去是在這個專案停用整個 plugin，**連它的指令、hook、agent 一起停**；再按一次啟用。寫在同一個 `settings.local.json` 的 `enabledPlugins`：停用寫 `"<plugin>@<marketplace>": false`，啟用刪掉那個鍵（完整的鍵從 Claude Code 記的已安裝 plugin 清單 `~/.claude/plugins/installed_plugins.json` 查）。同一個 plugin 從幾個 marketplace 裝時，任一個鍵是 `false` 就算停用：停用時已經有就不再寫，啟用時把它是 `false` 的鍵全部刪掉。plugin 的開關要重新載入才生效，cockpit 改完會代你跑 `/reload-plugins`（這會連 cockpit 自己一起重新載入），提示寫明 plugin 名稱與已代跑；設定檔本來就是那個狀態（沒有改）時不代跑，提示會說明。停用後它的 skill 不在清單裡了，組照樣列著（空的），在平常模式變暗、標「已關」，開關模式裡按得到「啟用」。cockpit 自己不能從這裡停用。**整個分類的開關不會停用 plugin**：只想關 skill 時不會連 `/impeccable` 這類指令都失去；要停用請按那一組。用 `move` 把 plugin 的 skill 混進一般的組、或收進自訂組（就算收了它的全部 skill）時，那一組都不是 plugin 組，沒有 plugin 的開關，裡面的 plugin skill 跟著它的 plugin 變暗。
 
 **填入輸入框的規則**（[基本] 與 [SKILL] 共用）：輸入框是空的就直接填；已經有字時，slash command 會放在最前面，原本的字變成它的參數，一般 prompt 則換一行接在後面。
 
@@ -105,6 +116,7 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 | [基本] | `p` | 編輯本專案的 `.claude/prompts.md`（有這個檔案時才出現） |
 | [基本] | `r` | 重新載入 |
 | [SKILL] | `s` | 跳到搜尋框（按 `Esc` 離開，搜尋文字會保留） |
+| [SKILL] | `o` | 進出開關模式（見上方「開關」） |
 | [SKILL] | `u`，再按 `q` `r` | 更新用法：快速（只補缺的）／重整（全部重新問一次） |
 | [SKILL] 的用法頁 | `f` `b` `t` | 把這個 skill 填進輸入框／返回列表／教學（沒有就產生，有就打開） |
 | [設定] | `e` | 編輯 SKILL 覆寫檔 |
@@ -139,14 +151,15 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 
 ### SKILL 覆寫：`~/.claude/cockpit/skills.json`
 
-在 [設定] 按「編輯 SKILL 覆寫」（`e`）用 VS Code 打開；檔案還不存在時會先建立一份範例，開頭的 `說明` 列了四個鍵的用法與寫法範例（JSON 不能寫註解，所以放在一個 cockpit 不讀的鍵裡，不需要可以整段刪掉）。存檔後切到別的分頁再切回 [SKILL] 就生效。
+在 [設定] 按「編輯 SKILL 覆寫」（`e`）用 VS Code 打開；檔案還不存在時會先建立一份範例，開頭的 `說明` 列了五個鍵的用法與寫法範例（JSON 不能寫註解，所以放在一個 cockpit 不讀的鍵裡，不需要可以整段刪掉）。存檔後切到別的分頁再切回 [SKILL] 就生效。
 
 ```json
 {
   "groups": { "mattpocock-skills": "mattpocock" },
   "descriptions": { "mattpocock-skills:wayfinder": "大型工作的地圖" },
   "hidden": ["mattpocock-skills:teach", "builtin-skills"],
-  "move": { "gitnexus-*": "gitnexus", "mattpocock-skills:grilling": "my-skills" }
+  "move": { "gitnexus-*": "gitnexus", "mattpocock-skills:grilling": "my-skills" },
+  "categories": { "專案": ["mattpocock-skills"], "工具": ["gitnexus", "builtin-skills"] }
 }
 ```
 
@@ -156,12 +169,22 @@ cockpit 會在 system prompt 加一段要求，請模型在每個任務名稱後
 | `descriptions` | 自訂短說明，優先於自動翻譯：skill 完整名稱 → 說明 |
 | `hidden` | 要隱藏的 skill（完整名稱）或整組。組的 id 是 plugin 名稱、來源的 `owner/repo` 或自訂組的 id，另外兩組是 `my-skills`、`builtin-skills` |
 | `move` | 把 skill 移到指定的組：skill 完整名稱 → 組的 id。列在 [SKILL] 裡的 skill 都能移（個人的、來源組的、plugin 的、內建的），蓋過預設的分組。名稱結尾可以加一個 `*` 比對前綴（`gitnexus-*`；只寫 `"*"` 就是所有 skill），同時符合時完整名稱優先，符合多個前綴時取最長的。組的 id 和現有的組同名就併進那一組，否則開一個自訂組，和 plugin 組一起照字母排，一樣能用 `groups` 改名、用 `hidden` 藏掉。找不到的 skill 安靜略過 |
+| `categories` | 把組歸進分類：分類名稱（就是顯示的名稱）→ 組 id 的陣列。有寫時 [SKILL] 的搜尋列下方多一排分類分頁籤，一次看一個分類（見下方說明） |
 
 `move` 的幾個細節：
 
 - `move` 比整組的 `hidden` 優先：從藏掉的組移出來的 skill，會出現在新的組裡；但 `hidden` 裡單獨列名的 skill，移到哪組都照樣藏著。
 - 只有 skill 能移：`/clear` 這類內建指令本來就不列在 [SKILL]，寫進 `move` 也不會有作用。
 - plugin skill 移到別組後，顯示的名稱照舊省略前綴，所以可能和那組裡另一個同名的 skill 看起來一模一樣；插入輸入框的還是完整名稱，不會選錯。
+
+`categories` 的規則：
+
+- 歸類在分組與 `move` 之後，看的是 `move` 之後的組 id，所以 `move` 開的自訂組也能放進分類。
+- 分類照寫的順序排，分類裡的組照寫的順序排；沒寫到的組集中在最後的「未分類」（名稱固定），照原本的順序。所有組都歸好了就沒有「未分類」。
+- 一個組只屬一個分類：同一組寫在兩個分類時只算先寫的那個。不存在（或已經藏掉）的組 id 安靜略過，一個組都對不上的分類不出現；分類不能取名「未分類」。
+- `hidden` 不收分類名稱（分類名稱可能和組 id 撞名）；組與 skill 照舊用 `hidden` 藏。
+- 點分頁籤切換分類，選的分類跨 session 記住。搜尋時不限選中的分類，列出所有有符合項目的分類，組全部展開。
+- 沒寫 `categories`、格式不對，或寫的分類都對不上時，[SKILL] 和沒有這個功能時一模一樣。
 
 ### 面板參數
 
@@ -291,7 +314,8 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `hooks/tasks.ts` | 任務的所有變化（TodoWrite、TaskCreate、TaskUpdate、清除、隱藏、跟隨）、攤平的任務樹、預估與校正、每個任務列要畫的欄 |
 | `hooks/usage.ts` | 用量（含「狀態」框的行數與配色）與 toast 判斷 |
 | `hooks/prompts.ts` | `prompts.md` 解析 |
-| `hooks/skills.ts` | SKILL 分組、搜尋與覆寫檔 |
+| `hooks/skills.ts` | SKILL 分組、分類、搜尋與覆寫檔；這一次顯示哪幾組、分類標題列畫在哪、頂端佔幾行 |
+| `hooks/switches.ts` | SKILL 的開關：哪些 skill 關著、組與分類的開／關／部分與 token 合計、按組或分類時改哪些、`settings.local.json` 怎麼改、分類標題列、分頁籤與開關按鈕的字、行尾留的寬度、按完的提示；停用整個 plugin：哪一組是 plugin 組（與分類裡有幾個）、`enabledPlugins` 的鍵、停用的 plugin 照樣列出的組 |
 | `hooks/translate.ts` | SKILL 說明的翻譯流程與快取 |
 | `hooks/source.ts` | 找一個 skill 的原文（SKILL.md）：各種來源的定位規則 |
 | `hooks/howto.ts` | SKILL 用法的整理流程、快取與失效（程式裡用法叫 howto，`usage` 是用量） |
@@ -305,7 +329,7 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `CHANGELOG.md` | 更新紀錄：寫給同事看的每一版改了什麼。新的在最上面，每版一個二級標題且標題剛好是版本號（cockpit 靠它找條目），底下一到三條，不寫日期 |
 | `CONTEXT.md` | 用語表（effort、地圖、決策票、實作票…） |
 | `hooks/files.ts` | 面板讀寫檔案唯一的方式：路徑怎麼接（專案的檔案從專案根目錄算）、讀不到算什麼；路線圖、原文、教學、常用 prompt 共用 |
-| `hooks/remembered.ts` | 跨 session 記住的面板狀態：`$.store` 有哪些鍵、讀回來怎麼驗（清單、翻譯、版本號）、開場停在哪個分頁、版本有沒有換 |
+| `hooks/remembered.ts` | 跨 session 記住的面板狀態：`$.store` 有哪些鍵、讀回來怎麼驗（清單、翻譯、版本號、[SKILL] 選的分類）、開場停在哪個分頁、版本有沒有換 |
 | `hooks/release.ts` | 更新：發布的版本去哪裡看、這一份是從哪裡裝的、看完之後該做什麼、要跑哪些指令；版本號誰新誰舊、升版與退版各怎麼講（提示與標示各一組）；開場該不該檢查、該不該自己下載（退版不看「自動更新」）、該不該提示、該不該把磁碟換回發布的版本、該留著哪一種標示 |
 | `hooks/changelog.ts` | 更新紀錄：放在哪裡、格式、從裡面挑出哪幾版的條目、怎麼接進「檢查版本」的詢問、沒有這個檔時說什麼。「標題剛好是版本號」這條規則和 `scripts/publish.mjs` 各有一份，要一起改 |
 | `hooks/events.ts` | 引擎的事件對面板代表什麼：工具成功的定義、寫檔與 shell 指令各算哪一種路線圖事件 |
