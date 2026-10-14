@@ -16,7 +16,7 @@ import type {
   UsageSnapshot,
 } from '../types'
 import { NO_CHANGELOG, changelogBeside, changelogIn, notesBetween, withNotes } from './changelog'
-import { FIELDS, TABS, parseSettings, rawValues } from './config'
+import { FIELDS, TABS, changedFields, parseSettings, rawValues, resetLabel } from './config'
 import type { Field, Settings } from './config'
 import type { Ask } from './ask'
 import { rootedAt, safeFiles, tidy, under } from './files'
@@ -26,7 +26,7 @@ import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
 import { viewHowtoPage } from './howtoPage'
-import { ROW_GAP, chrome, fitText, foldLabel, gridRows, isFootFit, keysWidth, layout, tabBar as tabBarOf, textWidth } from './layout'
+import { ROW_GAP, chrome, fitText, foldLabel, footPlan, gridRows, gridSlots, keysWidth, layout, tabBar as tabBarOf, textWidth } from './layout'
 import type { Row } from './layout'
 import { singleJob } from './once'
 import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
@@ -1879,15 +1879,15 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     await update($, skillCategory, () => name)
     await $.store.set('skillCategory', name)
   }
-  // 有分類時搜尋列下方多一排分類分頁籤，照寫的順序，「未分類」在最後；整個分類關掉或部分關掉時標「·關」「·部分」。
-  // 平常看一個分類時，它的標題列也固定在頂端（不跟著翻頁），開關模式的按鈕在那一列
+  // 有分類時頂端是一排分類分頁籤，照寫的順序，「未分類」在最後；整個分類關掉或部分關掉時標「·關」「·部分」。
+  // 平常看一個分類時，它的 token 數接在同一列的右端（開了幾個看分頁籤的標記就知道），不另佔一行。
+  // 搜尋框在底部（說明區下面）
+  const pickedTokens =
+    isHeadOnTop && picked !== undefined ? summaryOf(fullCategory(picked.name)?.groups ?? picked.groups).tokens : undefined
   const top =
-    categories === undefined ? (
-      searchRow
-    ) : (
-      <Box key="skill-top" flexDirection="column">
-        {searchRow}
-        <Box key="skill-categories" flexDirection="row" gap={1}>
+    categories === undefined ? undefined : (
+      <Box key="skill-top" flexDirection="row" gap={1}>
+        <Box key="skill-categories" flexDirection="row" gap={1} flexGrow={1} flexShrink={1}>
           {categories.map(c => {
             const label = tabLabel(c.name, summaryOf(c.groups).state)
             return (
@@ -1903,7 +1903,11 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             )
           })}
         </Box>
-        {isHeadOnTop && picked !== undefined && categoryHead(picked.name)}
+        {pickedTokens !== undefined && (
+          <Box key="skill-category-tokens" flexShrink={0}>
+            <Text dimColor>{`${shortTokens(pickedTokens)} tokens`}</Text>
+          </Box>
+        )}
       </Box>
     )
 
@@ -2043,8 +2047,9 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   }
 
   return {
-    top,
-    topRows: view.topRows,
+    ...(top === undefined ? {} : { top, topRows: view.topRows }),
+    // 搜尋框在框內最後一行（說明區下面），像在底下打字篩選
+    bottom: searchRow,
     actions,
     actionsWidth,
     rows,
@@ -2063,6 +2068,12 @@ const INDICATOR_COLOR = 'warning'
 async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabContent> {
   const { Box, Text, Button } = ui
   const Select = 'Select' in ui ? ui.Select : undefined
+  const changed = new Set(changedFields(config.raw))
+
+  const editOverrides = () =>
+    void (async () => {
+      await openInEditor($, `${await homeDir($)}/.claude/cockpit/skills.json`, SAMPLE_OVERRIDES)
+    })()
 
   const rows: Row<JSX.Element>[] = []
   for (const name of [...new Set(FIELDS.map(f => f.group))]) {
@@ -2071,15 +2082,28 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
       id: `set-group-${name}`,
       group,
       isHeader: true,
-      value: <Text dimColor>{name}</Text>,
+      // 覆寫檔管的是整個 SKILL 分頁，按鈕放在 SKILL 組名的右端，不排成像一個選項
+      value:
+        name === 'SKILL' ? (
+          <Box flexDirection="row" gap={1}>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor>{name}</Text>
+            </Box>
+            <Button key="edit-overrides" label="編輯覆寫" plain dimColor hotkey="e" onPress={editOverrides} />
+          </Box>
+        ) : (
+          <Text dimColor>{name}</Text>
+        ),
     })
     for (const f of FIELDS.filter(x => x.group === name)) {
+      // 還是預設值的標籤變暗，改過的維持一般色、值後面多一個「•」，看得出改過哪些
+      const isChanged = changed.has(f.field)
       rows.push({
         id: `set-${f.field}`,
         group,
         value: (
           <Box flexDirection="row" gap={1} paddingLeft={2}>
-            <Text>{padded(f.label)}</Text>
+            <Text dimColor={!isChanged}>{padded(f.label)}</Text>
             {Select ? (
               <Select
                 key={`set-select-${f.field}`}
@@ -2092,69 +2116,64 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
             ) : (
               <Text>{config.raw[f.field]}</Text>
             )}
-          </Box>
-        ),
-      })
-    }
-    // 覆寫檔的按鈕接在 SKILL 組的設定後面
-    if (name === 'SKILL') {
-      rows.push({
-        id: 'set-skill-overrides',
-        group,
-        value: (
-          <Box paddingLeft={2}>
-            <Button
-              key="edit-overrides"
-              label="編輯 SKILL 覆寫"
-              plain
-              hotkey="e"
-              onPress={() =>
-                void (async () => {
-                  await openInEditor($, `${await homeDir($)}/.claude/cockpit/skills.json`, SAMPLE_OVERRIDES)
-                })()
-              }
-            />
+            {isChanged && <Text dimColor>•</Text>}
           </Box>
         ),
       })
     }
   }
-  rows.push({
-    id: 'set-reset',
-    value: <Button key="reset-options" label="恢復預設值" onPress={() => void resetOptions($)} />,
-  })
-  // 面板的狀態怪怪的時候救急用；沒有快捷鍵，免得誤按
-  rows.push({
-    id: 'set-reload',
-    value: <Button key="reload-mods" label="重新載入 mod" onPress={() => void reloadMods($)} />,
-  })
-  // 最下面一行是目前裝的版本，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版。
+
+  // 少用的維護按鈕疊在下框線左端，暗色、沒有快捷鍵（免得誤按）。
+  // 「恢復預設值」寫出會改幾項；都是預設值時暗著、按了沒有作用
+  const reset = resetLabel(changed.size)
+  const actions = (
+    <Box key="settings-actions" flexDirection="row" gap={2}>
+      <Button
+        key="reset-options"
+        label={reset}
+        plain
+        dimColor
+        onPress={() => void (changed.size > 0 ? resetOptions($) : undefined)}
+      />
+      {/* 面板的狀態怪怪的時候救急用 */}
+      <Button key="reload-mods" label="重新載入 mod" plain dimColor onPress={() => void reloadMods($)} />
+    </Box>
+  )
+  const actionsWidth = 2 + textWidth(reset) + 2 + textWidth('重新載入 mod')
+
+  // 目前裝的版本疊在下框線右端，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版。
   // 發布的版本和裝的不同時，版本號後面留著高亮的標示，換上之後才消失。已經下載的話按鈕換成「立即換上」：
   // 不必詢問，重新載入 mod 就換上（不必重開 Claude Code），由新的那一份在開場講現在是哪一版
   const version = await readVersion($)
   const indicator = await shownIndicator($)
-  if (version !== '')
-    rows.push({
-      id: 'set-version',
-      value: (
-        <Box flexDirection="row" gap={2}>
-          <Text dimColor>{`cockpit ${version}`}</Text>
-          {indicator && (
-            <Text bold color={INDICATOR_COLOR}>
-              {indicator.text}
-            </Text>
-          )}
-          {indicator?.kind === 'downloaded' ? (
-            <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void reloadMods($)} />
-          ) : (
-            <Button key="check-version" label="檢查版本" plain onPress={() => void checkVersion($)} />
-          )}
-          <Button key="changelog" label="更新紀錄" plain onPress={() => void openChangelog($)} />
-        </Box>
-      ),
-    })
-
-  return { rows }
+  if (version === '') return { actions, actionsWidth, rows }
+  const versionText = `cockpit ${version}`
+  const checkLabel = indicator?.kind === 'downloaded' ? SWITCH_NOW : '檢查版本'
+  const status = (
+    <Box key="settings-version" flexDirection="row" gap={2}>
+      <Text dimColor>{versionText}</Text>
+      {indicator && (
+        <Text bold color={INDICATOR_COLOR}>
+          {indicator.text}
+        </Text>
+      )}
+      {indicator?.kind === 'downloaded' ? (
+        <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void reloadMods($)} />
+      ) : (
+        <Button key="check-version" label="檢查版本" plain onPress={() => void checkVersion($)} />
+      )}
+      <Button key="changelog" label="更新紀錄" plain onPress={() => void openChangelog($)} />
+    </Box>
+  )
+  const statusWidth =
+    2 +
+    textWidth(versionText) +
+    (indicator ? 2 + textWidth(indicator.text) : 0) +
+    2 +
+    textWidth(checkLabel) +
+    2 +
+    textWidth('更新紀錄')
+  return { actions, actionsWidth, status, statusWidth, rows }
 }
 
 // ══ 登記 hook 與外框 ══════════════════════════════════════════════════════
@@ -2471,22 +2490,32 @@ export const register: Register = (on, options) => {
           : currentTab === 'skill'
             ? await skillTab($, ctx)
             : await settingsTab($, ctx)
-    // 分頁的操作疊在下框線左端；和翻頁鍵放不下時退回框內的最後一行
-    const isActionsOnBorder = content.actions !== undefined && isFootFit(cols, content.actionsWidth ?? 0)
-    const isActionsInside = content.actions !== undefined && !isActionsOnBorder
-    const shape = layout(content.rows, {
-      bodyRows: e.props.scroll.bodyRows,
-      // 用量的行數，加上模型與深度那一行
-      stateRows: area.rows + 1,
-      isTabsOnBorder,
-      isInline: e.props.placement === 'inline',
-      inlineRows: settings.inlineRows,
-      fixedRows:
-        (content.top ? (content.topRows ?? 1) : 0) + (content.bottom ? 1 : 0) + (isActionsInside ? 1 : 0),
-      detailColumns: cols,
-      page: allPages[currentTab],
-      followId: content.followId,
-    })
+    // 分頁的操作疊在下框線左端、狀態疊在右端（要翻頁時右端是翻頁鍵）；放不上的退回框內的最後幾行。
+    // 有沒有要翻頁要排過才知道，所以先照不翻頁排一次，真的要翻頁再照翻頁排
+    const footFor = (hasPages: boolean) =>
+      footPlan(cols, { actions: content.actions && content.actionsWidth, status: content.status && content.statusWidth, hasPages })
+    const shapeWith = ({ isActionsInside, isStatusInside }: ReturnType<typeof footFor>) =>
+      layout(content.rows, {
+        bodyRows: e.props.scroll.bodyRows,
+        // 用量的行數，加上模型與深度那一行
+        stateRows: area.rows + 1,
+        isTabsOnBorder,
+        isInline: e.props.placement === 'inline',
+        inlineRows: settings.inlineRows,
+        fixedRows:
+          (content.top ? (content.topRows ?? 1) : 0) +
+          (content.bottom ? 1 : 0) +
+          (isActionsInside ? 1 : 0) +
+          (isStatusInside ? 1 : 0),
+        detailColumns: cols,
+        page: allPages[currentTab],
+        followId: content.followId,
+      })
+    const single = footFor(false)
+    const singleShape = shapeWith(single)
+    const foot = singleShape.pageCount > 1 ? footFor(true) : single
+    const shape = foot === single ? singleShape : shapeWith(foot)
+    const { isActionsOnBorder, isActionsInside, isStatusOnBorder, isStatusInside } = foot
     const p = shape.page
     /** 停在這一行（格）時才出現的東西；這一頁沒有說明欄（沒有 scope）時照常顯示 */
     const trailingOf = (key: string, trailing: JSX.Element | undefined, scope: string | undefined) =>
@@ -2513,9 +2542,20 @@ export const register: Register = (on, options) => {
         // 每一格自己是一個 hover scope：滑鼠在哪一格上，說明欄就顯示哪一個。
         // 欄與欄之間的間隔畫一條暗色直線，眼睛順著欄往下讀（格子是先由上往下排滿一欄）
         <Box key={l.row.id} flexDirection="row" paddingLeft={l.indent}>
-          {l.cells.map((c, i) => (
+          {gridSlots(l.cells, l.row.columnWidth, l.gap).map(({ cell: c, column, blanks }) => (
             <Box key={`${c.id}-column`} flexDirection="row" flexShrink={0}>
-              {i > 0 && (
+              {/* 前面空著的欄（被跨欄的名稱佔走、或那一欄到這裡已經排完）補空白，直線才會對齊 */}
+              {Array.from({ length: blanks }, (_, k) => column - blanks + k).map(at => (
+                <Box key={`${c.id}-blank-${at}`} flexDirection="row" flexShrink={0}>
+                  {at > 0 && (
+                    <Box width={l.gap} flexShrink={0}>
+                      <Text dimColor>│</Text>
+                    </Box>
+                  )}
+                  <Box width={l.row.columnWidth ?? 0} flexShrink={0} />
+                </Box>
+              ))}
+              {column > 0 && (
                 <Box key={`${c.id}-sep`} width={l.gap} flexShrink={0}>
                   <Text dimColor>│</Text>
                 </Box>
@@ -2621,10 +2661,19 @@ export const register: Register = (on, options) => {
         {spareRows > 0 && <Box key="spare" height={spareRows} />}
         {detailArea}
         {content.bottom}
+        {isStatusInside && content.status}
         {isActionsInside && content.actions}
       </Box>
     )
     // 操作疊在下框線上時頭尾各留一格，和翻頁鍵一樣
+    // 狀態疊在下框線右端時頭尾各留一格
+    const statusFoot = isStatusOnBorder && (
+      <Box key="status" flexDirection="row">
+        <Text> </Text>
+        {content.status}
+        <Text> </Text>
+      </Box>
+    )
     const actionsFoot = isActionsOnBorder && (
       <Box key="actions" flexDirection="row">
         <Text> </Text>
@@ -2666,7 +2715,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {framed('card-a', <Text bold> 狀態 </Text>, stateBody)}
         {!isTabsOnBorder && tabBar}
-        {framed('card-b', isTabsOnBorder ? tabBar : <Text />, tabBody, pager, actionsFoot)}
+        {framed('card-b', isTabsOnBorder ? tabBar : <Text />, tabBody, pager || statusFoot, actionsFoot)}
       </Box>
     )
   })

@@ -1,6 +1,6 @@
 {
   "name": "cockpit",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "右側面板：模型與深度切換、用量色塊，以及任務、常用 prompt、SKILL、設定四個分頁",
   "author": { "name": "Justin Chung" },
   "license": "UNLICENSED",

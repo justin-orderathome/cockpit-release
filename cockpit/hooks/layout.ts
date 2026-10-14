@@ -19,6 +19,8 @@ export type Cell<T> = {
   detailHint?: string
   /** 這一格佔幾格寬（由 `grid` 算出）；不給就照內容的寬度 */
   width?: number
+  /** 這一格從第幾欄開始（由 `grid` 算出，從 0 起）；前面空著的欄由畫面補空白與直線 */
+  column?: number
   value: T
   /** 接在內容後面、只在停在這一格時才出現的東西（例如 skill 的「?」）；這一頁沒有說明欄時照常顯示 */
   trailing?: T
@@ -37,7 +39,11 @@ export type PlainRow<T> = RowBase & {
 }
 
 /** 橫向並排幾格的一行，用 `gridRows` 產生 */
-export type GridRow<T> = RowBase & { cells: readonly Cell<T>[] }
+export type GridRow<T> = RowBase & {
+  cells: readonly Cell<T>[]
+  /** 一欄幾格寬；畫欄與欄之間的直線時，空著的位置照這個寬度補 */
+  columnWidth?: number
+}
 
 /** B 區的一行。`id` 在分頁內唯一：畫面上的 key 用它，說明欄也用它對應。 */
 export type Row<T> = PlainRow<T> | GridRow<T>
@@ -226,22 +232,54 @@ export function gridRows<I, T>(
   },
 ): GridRow<T>[] {
   const mark = textWidth(GRID.mark)
-  const lines = grid(items, item => mark + spec.labelWidth(item), Math.max(4, width - GRID.indent), GRID)
+  const room = Math.max(4, width - GRID.indent)
+  const lines = grid(items, item => mark + spec.labelWidth(item), room, GRID)
+  const { column: columnWidth } = columnsFor(room, GRID)
   return lines.map((line, i) => ({
     id: `${spec.rowId}-${i}`,
     group: spec.group,
-    cells: line.map(({ item, width: w }) => {
+    columnWidth,
+    cells: line.map(({ item, width: w, column }) => {
       const trailing = spec.trailing?.(item)
       return {
         id: spec.id(item),
         detail: spec.detail(item),
         detailHint: spec.detailHint?.(item),
         width: w,
+        column,
         value: spec.cell(item, w - mark),
         ...(trailing === undefined ? {} : { trailing }),
       }
     }),
   }))
+}
+
+/**
+ * 一行裡每一格從第幾欄開始，以及它前面要補幾個空著的欄（被跨欄的名稱佔走、或那一欄排完了），
+ * 畫欄與欄之間的直線時才對得齊。沒有欄的資訊（不是 `gridRows` 產生的）時照順序一格一欄。
+ */
+export function gridSlots<C extends { column?: number; width?: number }>(
+  cells: readonly C[],
+  columnWidth: number | undefined,
+  gap: number,
+): { cell: C; column: number; blanks: number }[] {
+  let at = 0
+  return cells.map(cell => {
+    const column = Math.max(at, cell.column ?? at)
+    const blanks = column - at
+    const span =
+      columnWidth === undefined || cell.width === undefined
+        ? 1
+        : Math.max(1, Math.round((cell.width + gap) / (columnWidth + gap)))
+    at = column + span
+    return { cell, column, blanks }
+  })
+}
+
+/** 寬 `width` 放得下幾欄（`columns`），以及每欄幾格寬（`column`，欄寬平分整行） */
+function columnsFor(width: number, { minColumn, gap, maxColumns }: { minColumn: number; gap: number; maxColumns: number }) {
+  const columns = Math.max(1, Math.min(maxColumns, Math.floor((width + gap) / (minColumn + gap))))
+  return { columns, column: Math.max(1, Math.floor((width - gap * (columns - 1)) / columns)) }
 }
 
 /**
@@ -256,15 +294,14 @@ export function grid<T>(
   widthOf: (item: T) => number,
   width: number,
   { minColumn, gap, maxColumns }: { minColumn: number; gap: number; maxColumns: number },
-): { item: T; width: number }[][] {
-  const columns = Math.max(1, Math.min(maxColumns, Math.floor((width + gap) / (minColumn + gap))))
-  const column = Math.max(1, Math.floor((width - gap * (columns - 1)) / columns))
+): { item: T; width: number; column: number }[][] {
+  const { columns, column } = columnsFor(width, { minColumn, gap, maxColumns })
   const spanWidth = (span: number) => span * column + (span - 1) * gap
   const spans = items.map(item => Math.max(1, Math.min(columns, Math.ceil((widthOf(item) + gap) / (column + gap)))))
 
   /** 排成 `rows` 行；有佔多欄的格超出最右邊就排不下 */
   const place = (rows: number) => {
-    const lines: { item: T; width: number }[][] = Array.from({ length: rows }, () => [])
+    const lines: { item: T; width: number; column: number }[][] = Array.from({ length: rows }, () => [])
     const taken = new Set<number>()
     // at 是由上到下、由左到右數的第幾個位置
     let at = 0
@@ -274,7 +311,7 @@ export function grid<T>(
       const col = Math.floor(at / rows)
       if (col + span > columns) return undefined
       for (let k = 1; k < span; k++) taken.add(at + k * rows)
-      lines[at % rows]?.push({ item, width: spanWidth(span) })
+      lines[at % rows]?.push({ item, width: spanWidth(span), column: col })
       at++
     }
     return lines.filter(line => line.length > 0)
@@ -285,7 +322,7 @@ export function grid<T>(
     const lines = place(rows)
     if (lines !== undefined) return lines
   }
-  return items.map((item, i) => [{ item, width: spanWidth(spans[i] ?? 1) }])
+  return items.map((item, i) => [{ item, width: spanWidth(spans[i] ?? 1), column: 0 }])
 }
 
 /**
@@ -350,9 +387,29 @@ export const PAGER_WIDTH = keysWidth([{ hotkey: 'k', label: '上頁' }, { hotkey
 
 /**
  * 分頁的操作按鈕疊在下框線的左端、翻頁鍵在右端，都不佔行。框內寬 `columns` 格時，
- * 寬 `width` 的操作放不放得上（照有翻頁鍵算，兩者之間至少留一格框線）；放不下就退回框內的最後一行。
+ * 寬 `width` 的操作和翻頁鍵放不放得上（兩者之間至少留一格框線）；放不下就退回框內的最後一行。
  */
 export const isFootFit = (columns: number, width: number) => width + PAGER_WIDTH + 1 <= columns
+
+/**
+ * 下框線上放什麼：左端是分頁的操作（寬 `actions`），右端要翻頁時是翻頁鍵、不翻頁時是分頁的狀態（寬 `status`）。
+ * 操作優先；放不上框線的退回框內的最後幾行（各佔一行）。沒有的那一項傳 `undefined`。
+ */
+export function footPlan(
+  columns: number,
+  { actions, status, hasPages }: { actions: number | undefined; status: number | undefined; hasPages: boolean },
+): { isActionsOnBorder: boolean; isActionsInside: boolean; isStatusOnBorder: boolean; isStatusInside: boolean } {
+  const right = hasPages ? PAGER_WIDTH : 0
+  const isActionsOnBorder = actions !== undefined && actions + right + 1 <= columns
+  const left = isActionsOnBorder ? (actions ?? 0) : 0
+  const isStatusOnBorder = status !== undefined && !hasPages && left + status + 1 <= columns
+  return {
+    isActionsOnBorder,
+    isActionsInside: actions !== undefined && !isActionsOnBorder,
+    isStatusOnBorder,
+    isStatusInside: status !== undefined && !isStatusOnBorder,
+  }
+}
 
 /** 把文字折成每行不超過 `width` 格的幾行（照格數折，不看單字邊界）；原本的換行照樣換行。 */
 export function wrapText(text: string, width: number): string[] {

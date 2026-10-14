@@ -189,9 +189,9 @@ export type SkillView = {
   groups: SkillGroup[]
   /** 組 id → 排在它前面的分類標題（只有列出的每個分類的第一組有） */
   before: Map<string, string>
-  /** 選中分類的標題列固定在頂端（平常看一個分類時）；否則標題列跟著列表 */
+  /** 平常看一個分類時，它的 token 數接在頂端分頁籤那一列的右端，列表裡不再有它的標題列；搜尋時標題列跟著列表 */
   isHeadOnTop: boolean
-  /** 頂端固定的行數：搜尋列；有分類時加分頁籤；標題列在頂端時再加一行 */
+  /** 頂端固定的行數：有分類時是分頁籤那一列；沒有分類時沒有（搜尋框在底部） */
   topRows: number
 }
 
@@ -206,7 +206,7 @@ export function skillView(
   query: string,
 ): SkillView {
   if (categories === undefined)
-    return { groups: filterSkills(all, query), before: new Map(), isHeadOnTop: false, topRows: 1 }
+    return { groups: filterSkills(all, query), before: new Map(), isHeadOnTop: false, topRows: 0 }
   const isSearching = query.trim() !== ''
   const picked = categories.find(c => c.name === chosen) ?? categories[0]
   const shown = isSearching ? filterCategories(categories, query) : picked ? [picked] : []
@@ -216,7 +216,7 @@ export function skillView(
     groups: shown.flatMap(c => c.groups),
     before: new Map(shown.flatMap(c => (c.groups[0] ? [[c.groups[0].id, c.name] as const] : []))),
     isHeadOnTop,
-    topRows: isHeadOnTop ? 3 : 2,
+    topRows: 1,
   }
 }
 

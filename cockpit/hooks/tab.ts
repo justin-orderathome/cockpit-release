@@ -27,6 +27,10 @@ export type TabContent = {
   actions?: JSX.Element
   /** `actions` 畫出來多寬（`keysWidth` 算） */
   actionsWidth?: number
+  /** 這個分頁的狀態（例如 [設定] 的版本）：疊在下框線的右端；要翻頁（翻頁鍵在那裡）或放不下時退回框內的最後一行 */
+  status?: JSX.Element
+  /** `status` 畫出來多寬，頭尾各一格算在內 */
+  statusWidth?: number
   rows: Row<JSX.Element>[]
   /** 一行都沒有時顯示的話 */
   emptyText?: string

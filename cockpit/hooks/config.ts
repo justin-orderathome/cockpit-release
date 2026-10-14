@@ -123,6 +123,13 @@ export function rawValues(options: Readonly<Record<string, unknown>> | undefined
   return out
 }
 
+/** 改過（不是預設值）的參數；[設定] 拿來標出改過的、寫「恢復預設值」會改幾項 */
+export const changedFields = (raw: Readonly<Record<Field, string>>): Field[] =>
+  FIELDS.filter(f => raw[f.field] !== f.fallback).map(f => f.field)
+
+/** 「恢復預設值」按鈕上的字：寫出會改幾項；都是預設值時說明不必按 */
+export const resetLabel = (changed: number) => (changed === 0 ? '恢復預設值（都是預設）' : `恢復預設值（${changed} 項）`)
+
 export function parseSettings(options: Readonly<Record<string, unknown>> | undefined): Settings {
   const raw = rawValues(options)
   return {
