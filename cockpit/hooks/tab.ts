@@ -23,6 +23,10 @@ export type TabContent = {
   /** `top` 佔幾行；不給就是一行（[SKILL] 有分類時多一排分頁籤） */
   topRows?: number
   bottom?: JSX.Element
+  /** 這個分頁的操作按鈕：疊在下框線的左端（和右端的翻頁鍵同一條），放不下時退回框內的最後一行 */
+  actions?: JSX.Element
+  /** `actions` 畫出來多寬（`keysWidth` 算） */
+  actionsWidth?: number
   rows: Row<JSX.Element>[]
   /** 一行都沒有時顯示的話 */
   emptyText?: string

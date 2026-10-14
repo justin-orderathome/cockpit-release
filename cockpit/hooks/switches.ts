@@ -303,8 +303,6 @@ export function tokensOf(names: readonly string[], frontmatter: readonly Frontma
 export const SWITCH_TAIL = 13
 /** 開關模式 plugin 的 skill 的行尾：只有 token 數（沒有開關），連同前面的間隔 */
 export const TOKENS_TAIL = 6
-/** 分類標題列右邊的「o: 開關」，連同前面的間隔 */
-export const SWITCH_BUTTON = 9
 /** 開關模式組的行尾：token 數、間隔與 `[ 部分 ]`，連同前面的間隔 */
 export const GROUP_SWITCH_TAIL = 15
 /** 開關模式 plugin 組的行尾：token 數、間隔與 `[ 停用整個 plugin ]`，連同前面的間隔 */

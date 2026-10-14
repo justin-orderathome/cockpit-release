@@ -20,6 +20,8 @@ export type Cell<T> = {
   /** 這一格佔幾格寬（由 `grid` 算出）；不給就照內容的寬度 */
   width?: number
   value: T
+  /** 接在內容後面、只在停在這一格時才出現的東西（例如 skill 的「?」）；這一頁沒有說明欄時照常顯示 */
+  trailing?: T
 }
 
 /** 整行只有一樣東西的一行 */
@@ -29,6 +31,8 @@ export type PlainRow<T> = RowBase & {
   /** 滑鼠移到這一行時，接在說明欄標題後面的提示；沒有說明的行不會顯示 */
   detailHint?: string
   value: T
+  /** 接在內容後面、只在停在這一行時才出現的東西；見 `Cell` 的 `trailing` */
+  trailing?: T
   cells?: undefined
 }
 
@@ -51,6 +55,8 @@ export type Frame = {
   inlineRows: number
   /** 下方框裡固定在頂端與底端、不分頁的行數 */
   fixedRows: number
+  /** 說明欄一行幾格；用來算這一頁最長的說明要幾行 */
+  detailColumns: number
   /** 使用者翻到的頁（從 0 起） */
   page: number
   /** 要跟隨的行；找得到就翻到它那一頁，優先於 `page` */
@@ -77,6 +83,8 @@ export type Layout<T> = {
   pageCount: number
   /** 說明欄的文字行數（另有一行標題）；0 表示這一頁不顯示說明欄 */
   detailRows: number
+  /** 下方框撐到面板底時，列表與說明欄（沒有說明欄時是底端）之間要補的空行數 */
+  spareRows: number
   /** 每一份說明；`hint` 是停在它上面時接在標題後面的提示 */
   details: { id: string; scope: string; text: string; hint?: string }[]
 }
@@ -176,7 +184,24 @@ export function layout<T>(rows: readonly Row<T>[], frame: Frame): Layout<T> {
     const scope = scopeFor(l.row.id, l.row.detail, l.row.detailHint)
     return scope === undefined ? l : { ...l, scope }
   })
-  return { lines, page: at, pageCount: pages.length, detailRows: details.length > 0 ? detailRows : 0, details }
+  // 側邊面板的下方框撐到面板底，說明欄與按鍵列貼底。說明欄長到最長的說明需要的行數為止
+  // （至少原本的行數，最多到放得下），其餘的行留成列表與說明欄之間的空白。inline 時維持內容的高度
+  const hasDetail = details.length > 0
+  const free = frame.isInline
+    ? 0
+    : Math.max(0, room - frame.fixedRows - lines.length - (hasDetail ? detailCost : 0))
+  // 照內容反算：這個分頁所有說明裡最長的那一則要幾行（不只這一頁，翻頁時說明欄才不會忽高忽低）
+  const texts = rows.flatMap(r => (r.cells !== undefined ? r.cells.map(c => c.detail) : [r.detail]))
+  const needed = Math.max(0, ...texts.map(t => (t === undefined ? 0 : wrapText(t, frame.detailColumns).length)))
+  const grown = hasDetail ? Math.min(free, Math.max(0, needed - detailRows)) : 0
+  return {
+    lines,
+    page: at,
+    pageCount: pages.length,
+    detailRows: hasDetail ? detailRows + grown : 0,
+    spareRows: free - grown,
+    details,
+  }
 }
 
 /**
@@ -196,6 +221,8 @@ export function gridRows<I, T>(
     /** 接在說明欄標題後面的提示；不給就沒有 */
     detailHint?: (item: I) => string | undefined
     cell: (item: I, labelWidth: number) => T
+    /** 停在這一格時才出現的東西；寬度要算進 `labelWidth` */
+    trailing?: (item: I) => T | undefined
   },
 ): GridRow<T>[] {
   const mark = textWidth(GRID.mark)
@@ -203,13 +230,17 @@ export function gridRows<I, T>(
   return lines.map((line, i) => ({
     id: `${spec.rowId}-${i}`,
     group: spec.group,
-    cells: line.map(({ item, width: w }) => ({
-      id: spec.id(item),
-      detail: spec.detail(item),
-      detailHint: spec.detailHint?.(item),
-      width: w,
-      value: spec.cell(item, w - mark),
-    })),
+    cells: line.map(({ item, width: w }) => {
+      const trailing = spec.trailing?.(item)
+      return {
+        id: spec.id(item),
+        detail: spec.detail(item),
+        detailHint: spec.detailHint?.(item),
+        width: w,
+        value: spec.cell(item, w - mark),
+        ...(trailing === undefined ? {} : { trailing }),
+      }
+    }),
   }))
 }
 
@@ -309,6 +340,19 @@ const cells = (c: string) => (isWide(c.codePointAt(0) ?? 0) ? 2 : 1)
 
 /** 文字在畫面上佔幾格 */
 export const textWidth = (text: string) => [...text].reduce((n, c) => n + cells(c), 0)
+
+/** 一排快捷鍵按鈕畫出來多寬：每個是「鍵: 標籤」，按鈕之間隔兩格，頭尾各留一格 */
+export const keysWidth = (keys: readonly { hotkey: string; label: string }[]) =>
+  keys.length === 0 ? 0 : keys.reduce((n, k) => n + textWidth(`${k.hotkey}: ${k.label}`), 0) + 2 * (keys.length - 1) + 2
+
+/** 翻頁鍵（「k: 上頁  12/12  j: 下頁」，頭尾各一格）最寬佔幾格 */
+export const PAGER_WIDTH = keysWidth([{ hotkey: 'k', label: '上頁' }, { hotkey: 'j', label: '下頁' }]) + 5 + 2
+
+/**
+ * 分頁的操作按鈕疊在下框線的左端、翻頁鍵在右端，都不佔行。框內寬 `columns` 格時，
+ * 寬 `width` 的操作放不放得上（照有翻頁鍵算，兩者之間至少留一格框線）；放不下就退回框內的最後一行。
+ */
+export const isFootFit = (columns: number, width: number) => width + PAGER_WIDTH + 1 <= columns
 
 /** 把文字折成每行不超過 `width` 格的幾行（照格數折，不看單字邊界）；原本的換行照樣換行。 */
 export function wrapText(text: string, width: number): string[] {

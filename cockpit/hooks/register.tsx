@@ -26,7 +26,7 @@ import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
 import { viewHowtoPage } from './howtoPage'
-import { ROW_GAP, chrome, fitText, foldLabel, gridRows, layout, tabBar as tabBarOf, textWidth } from './layout'
+import { ROW_GAP, chrome, fitText, foldLabel, gridRows, isFootFit, keysWidth, layout, tabBar as tabBarOf, textWidth } from './layout'
 import type { Row } from './layout'
 import { singleJob } from './once'
 import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
@@ -86,7 +86,6 @@ import {
   INSTALLED_PLUGINS,
   LOCAL_SETTINGS,
   PLUGIN_SWITCH_TAIL,
-  SWITCH_BUTTON,
   SWITCH_TAIL,
   TOKENS_TAIL,
   UNREADABLE_SETTINGS,
@@ -117,7 +116,7 @@ import {
 import type { SwitchAction, SwitchSummary } from './switches'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
-import type { TabContent, TabContext } from './tab'
+import type { Elements, TabContent, TabContext } from './tab'
 import { EMPTY_BOARD, applyTask, formatDuration, hasRunning, taskCells, taskColumns, timeStamp, viewTasks } from './tasks'
 import type { TaskEvent, TaskView } from './tasks'
 import { translateAll } from './translate'
@@ -1116,18 +1115,20 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
           <Text dimColor>{headNote}</Text>
         </Text>
       </Box>
-      {view.hasCompleted && (
-        <Button
-          key="clear-done"
-          label="清除已完成"
-          plain
-          dimColor
-          hotkey="c"
-          onPress={() => void dispatch($, { kind: 'clearCompleted' })}
-        />
-      )}
     </Box>
   )
+  // 分頁的操作疊在下框線上，和其他分頁同一個位置
+  const actions = view.hasCompleted ? (
+    <Button
+      key="clear-done"
+      label="清除已完成"
+      plain
+      dimColor
+      hotkey="c"
+      onPress={() => void dispatch($, { kind: 'clearCompleted' })}
+    />
+  ) : undefined
+  const actionsWidth = view.hasCompleted ? keysWidth([{ hotkey: 'c', label: '清除已完成' }]) : 0
 
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
   const todoRows: Row<JSX.Element>[] = view.rows.map(r => {
@@ -1356,6 +1357,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
 
   return {
     top,
+    ...(actions === undefined ? {} : { actions, actionsWidth }),
     rows,
     emptyText: '模型使用待辦清單後，任務會顯示在這裡。',
     followId: view.followId,
@@ -1363,6 +1365,29 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
 }
 
 /** [基本] 分頁：常用 prompt。點了填進輸入框，名稱結尾標 ` !` 的直接送出。 */
+/**
+ * 組名列的字：組名加粗（掃讀時的錨點），個數暗色；裁到 `width` 格以內時先裁組名。
+ * `isDim`（整組關掉）時整行變暗、不加粗。`count` 不給就不寫個數。
+ */
+function groupHead(
+  { Text }: Elements,
+  isOpen: boolean,
+  title: string,
+  count: number | undefined,
+  width: number,
+  isDim = false,
+) {
+  const countText = count === undefined ? '' : ` (${count})`
+  const name = fitText(foldLabel(isOpen, title), Math.max(4, width - textWidth(countText)))
+  if (isDim) return <Text dimColor>{name + countText}</Text>
+  return (
+    <Text>
+      <Text bold>{name}</Text>
+      <Text dimColor>{countText}</Text>
+    </Text>
+  )
+}
+
 async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): Promise<TabContent> {
   const { Box, Text, Button } = ui
   const [groups, closedIds, hasProject] = await Promise.all([
@@ -1387,7 +1412,9 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             label={fitText(foldLabel(isOpen, `${g.title} (${g.entries.length})`), cols)}
             plain
             onPress={() => void toggleFold($, 'closedPromptGroups', g.id)}
-          />
+          >
+            {groupHead(ui, isOpen, g.title, g.entries.length, cols)}
+          </Button>
         ),
       })
     }
@@ -1415,7 +1442,13 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     }
   }
 
-  const bottom = (
+  // 分頁的操作疊在下框線上，和其他分頁同一個位置
+  const actionsWidth = keysWidth([
+    { hotkey: 'e', label: '編輯' },
+    ...(hasProject ? [{ hotkey: 'p', label: '編輯本專案' }] : []),
+    { hotkey: 'r', label: '重新載入' },
+  ])
+  const actions = (
     <Box key="basic-actions" flexDirection="row" gap={2}>
       <Button
         key="edit-prompts"
@@ -1441,7 +1474,7 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     </Box>
   )
 
-  return { bottom, rows, emptyText: '還沒有常用 prompt，按 [ 編輯 ] 建立。' }
+  return { actions, actionsWidth, rows, emptyText: '還沒有常用 prompt，按 [ 編輯 ] 建立。' }
 }
 
 /** 關掉翻譯或用法時傳給分組的空表；固定同一個，下面的記憶才比得出「沒變」 */
@@ -1631,8 +1664,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     await makeSkillHowtos($, run)
   }
 
-  // 開關模式：o 進出。按鈕一律在固定（不翻頁）的列上，o 在任何捲動位置都有效：
-  // 平常看一個分類時在頂端的分類標題列右邊；沒有分類、或搜尋時（可能列出好幾個分類，也可能一個都沒有）在搜尋列右邊
+  // 開關模式：o 進出。按鈕和「更新用法」一起疊在下框線上（分頁的操作都在那裡），不跟著翻頁，o 在任何捲動位置都有效
   const switchButton = (
     <Button
       key="switch-mode"
@@ -1670,30 +1702,54 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         )}
       </Box>
       {isSearching && <Button key="clear-search" label="×" onPress={() => void update($, search, () => '')} />}
-      {settings.howto &&
-        (isMakingNow ? (
-          <Box key="howto-making" flexShrink={0}>
-            <Text dimColor>用法整理中…</Text>
-          </Box>
-        ) : isChoosing ? (
-          // 按了「更新用法」：選只補缺的（快速），或全部重新問一次（重整）
-          <Box key="howto-menu" flexDirection="row" gap={1} flexShrink={0}>
-            <Button key="howto-quick" label="快速" plain hotkey="q" onPress={() => void runHowtos('quick')} />
-            <Button key="howto-full" label="重整" plain hotkey="r" onPress={() => void runHowtos('full')} />
-            <Button key="howto-menu-close" label="×" onPress={() => void update($, howtoMenu, () => false)} />
-          </Box>
-        ) : (
-          <Button
-            key="refresh-howtos"
-            label="更新用法"
-            plain
-            hotkey="u"
-            onPress={() => void update($, howtoMenu, () => true)}
-          />
-        ))}
-      {!isHeadOnTop && switchButton}
     </Box>
   )
+
+  // 分頁的操作（更新用法、開關）疊在下框線上；寬度照畫出來的字算
+  const howtoAction = !settings.howto
+    ? undefined
+    : isMakingNow
+      ? {
+          width: textWidth('用法整理中…'),
+          el: (
+            <Box key="howto-making" flexShrink={0}>
+              <Text dimColor>用法整理中…</Text>
+            </Box>
+          ),
+        }
+      : isChoosing
+        ? {
+            // 按了「更新用法」：選只補缺的（快速），或全部重新問一次（重整）；「×」畫成「[ × ]」
+            width: textWidth('q: 快速') + 2 + textWidth('r: 重整') + 2 + textWidth('[ × ]'),
+            el: (
+              <Box key="howto-menu" flexDirection="row" gap={2} flexShrink={0}>
+                <Button key="howto-quick" label="快速" plain hotkey="q" onPress={() => void runHowtos('quick')} />
+                <Button key="howto-full" label="重整" plain hotkey="r" onPress={() => void runHowtos('full')} />
+                <Button key="howto-menu-close" label="×" onPress={() => void update($, howtoMenu, () => false)} />
+              </Box>
+            ),
+          }
+        : {
+            width: keysWidth([{ hotkey: 'u', label: '更新用法' }]) - 2,
+            el: (
+              <Button
+                key="refresh-howtos"
+                label="更新用法"
+                plain
+                hotkey="u"
+                onPress={() => void update($, howtoMenu, () => true)}
+              />
+            ),
+          }
+  const switchWidth = keysWidth([{ hotkey: 'o', label: isSwitching ? '完成' : '開關' }]) - 2
+  const actions = (
+    <Box key="skill-actions" flexDirection="row" gap={2}>
+      {switchButton}
+      {howtoAction?.el}
+    </Box>
+  )
+  // 頭尾各留一格（`keysWidth` 的算法）
+  const actionsWidth = 2 + switchWidth + (howtoAction === undefined ? 0 : 2 + howtoAction.width)
 
   // plugin 的 skill 沒有單獨的開關，看它的 plugin 有沒有停用（move 混進一般組的也是）；其他的照 skillOverrides 算開或關
   const plugins = pluginSkills(listed)
@@ -1805,17 +1861,15 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     }
   }
   /** 分類的標題列：`<分類>：<開的數>/<總數> 開 · <N> tokens`；在頂端的那一列右邊是開關模式的按鈕 */
-  const categoryHead = (name: string, isOnTop: boolean) => {
+  const categoryHead = (name: string) => {
     const c = fullCategory(name)
     const title = categoryTitle(name, c === undefined ? { on: 0, total: 0 } : summaryOf(c.groups))
     return (
       <Box key={`skill-cat-head-${name}`} flexDirection="row" gap={1}>
         <Box flexGrow={1} flexShrink={1}>
-          <Text bold>
-            {fitText(title, isOnTop ? cols - SWITCH_BUTTON : cols)}
-          </Text>
+          {/* 統計是次要資訊，暗色；組名才是掃讀的錨點 */}
+          <Text dimColor>{fitText(title, cols)}</Text>
         </Box>
-        {isOnTop && switchButton}
       </Box>
     )
   }
@@ -1849,29 +1903,36 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             )
           })}
         </Box>
-        {isHeadOnTop && picked !== undefined && categoryHead(picked.name, true)}
+        {isHeadOnTop && picked !== undefined && categoryHead(picked.name)}
       </Box>
     )
 
-  /** 一個 skill 的按鈕；名稱（有用法時連同「?」）裁到 `room` 格以內。點名稱填入，點「?」開用法頁 */
+  /** 一個 skill 名稱的按鈕，裁到 `room` 格以內（有用法時替「?」留位置）。點了填入 */
+  const skillName = (s: SkillItem, room: number) => (
+    <Button
+      key={`skill-btn-${s.name}`}
+      label={fitText(s.label, s.howto ? room - HOWTO_MARK : room)}
+      plain
+      // 關掉的 skill 變暗，照樣點了填入
+      dimColor={isOff(s)}
+      onPress={() => void fillPrompt($, `/${s.name} `, s.label)}
+    />
+  )
+  /** 有用法的 skill 的「?」：點了開用法頁。平常藏著，停在那個 skill 上才出現，強調色才不會滿版都是 */
+  const howtoMark = (s: SkillItem) =>
+    s.howto ? (
+      <Button key={`howto-btn-${s.name}`} label="?" plain onPress={() => void openHowto($, s.name)}>
+        <Text color={accent}>?</Text>
+      </Button>
+    ) : undefined
+  /** 名稱連同「?」排在同一行（開關模式那一行用；那裡的「?」不藏，暗色） */
   const skillButton = (s: SkillItem, room: number) => {
-    const name = (
-      <Button
-        key={`skill-btn-${s.name}`}
-        label={fitText(s.label, s.howto ? room - HOWTO_MARK : room)}
-        plain
-        // 關掉的 skill 變暗，照樣點了填入
-        dimColor={isOff(s)}
-        onPress={() => void fillPrompt($, `/${s.name} `, s.label)}
-      />
-    )
+    const name = skillName(s, room)
     if (!s.howto) return name
     return (
       <Box key={`skill-cell-${s.name}`} flexDirection="row" gap={1}>
         {name}
-        <Button key={`howto-btn-${s.name}`} label="?" plain onPress={() => void openHowto($, s.name)}>
-          <Text color={accent}>?</Text>
-        </Button>
+        <Button key={`howto-btn-${s.name}`} label="?" plain dimColor onPress={() => void openHowto($, s.name)} />
       </Box>
     )
   }
@@ -1890,7 +1951,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     // 分類的第一組前面是分類的標題列（平常看一個分類時它固定在頂端，這裡不再畫），開關模式再多一列「整個分類」
     const category = view.before.get(g.id)
     if (category !== undefined) {
-      if (!isHeadOnTop) rows.push({ id: `skill-category-${category}`, value: categoryHead(category, false) })
+      if (!isHeadOnTop) rows.push({ id: `skill-category-${category}`, value: categoryHead(category) })
       const whole = isSwitching ? categorySwitchRow(category) : undefined
       if (whole !== undefined) rows.push(whole)
     }
@@ -1930,7 +1991,16 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
               plain
               dimColor={!isSwitching && tail !== null}
               onPress={() => void toggleFold($, 'openSkillGroups', g.id)}
-            />
+            >
+              {groupHead(
+                ui,
+                isOpen,
+                g.title,
+                g.items.length === 0 ? undefined : g.items.length,
+                cols - groupTailWidth,
+                !isSwitching && tail !== null,
+              )}
+            </Button>
           </Box>
           {tail === null ? null : <Box key={`group-tail-${g.id}`} flexShrink={0}>{tail}</Box>}
         </Box>
@@ -1953,18 +2023,21 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
           labelWidth: s => textWidth(s.label) + (s.howto ? HOWTO_MARK : 0),
           detail: s => s.description,
           detailHint: howtoHint,
-          cell: skillButton,
+          cell: skillName,
+          trailing: howtoMark,
         }),
       )
       continue
     }
     for (const s of g.items) {
+      const trailing = howtoMark(s)
       rows.push({
         id: `skill-${s.name}`,
         group,
         detail: s.description,
         detailHint: howtoHint(s),
-        value: <Box paddingLeft={2}>{skillButton(s, cols - 2)}</Box>,
+        value: <Box paddingLeft={2}>{skillName(s, cols - 2)}</Box>,
+        ...(trailing === undefined ? {} : { trailing }),
       })
     }
   }
@@ -1972,6 +2045,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   return {
     top,
     topRows: view.topRows,
+    actions,
+    actionsWidth,
     rows,
     emptyText: isSearching ? '沒有符合的 skill' : '讀取中…',
   }
@@ -2396,6 +2471,9 @@ export const register: Register = (on, options) => {
           : currentTab === 'skill'
             ? await skillTab($, ctx)
             : await settingsTab($, ctx)
+    // 分頁的操作疊在下框線左端；和翻頁鍵放不下時退回框內的最後一行
+    const isActionsOnBorder = content.actions !== undefined && isFootFit(cols, content.actionsWidth ?? 0)
+    const isActionsInside = content.actions !== undefined && !isActionsOnBorder
     const shape = layout(content.rows, {
       bodyRows: e.props.scroll.bodyRows,
       // 用量的行數，加上模型與深度那一行
@@ -2403,29 +2481,56 @@ export const register: Register = (on, options) => {
       isTabsOnBorder,
       isInline: e.props.placement === 'inline',
       inlineRows: settings.inlineRows,
-      fixedRows: (content.top ? (content.topRows ?? 1) : 0) + (content.bottom ? 1 : 0),
+      fixedRows:
+        (content.top ? (content.topRows ?? 1) : 0) + (content.bottom ? 1 : 0) + (isActionsInside ? 1 : 0),
+      detailColumns: cols,
       page: allPages[currentTab],
       followId: content.followId,
     })
     const p = shape.page
+    /** 停在這一行（格）時才出現的東西；這一頁沒有說明欄（沒有 scope）時照常顯示 */
+    const trailingOf = (key: string, trailing: JSX.Element | undefined, scope: string | undefined) =>
+      trailing === undefined ? null : scope === undefined ? (
+        <Box key={`${key}-trailing`} paddingLeft={1} flexShrink={0}>
+          {trailing}
+        </Box>
+      ) : (
+        <Box key={`${key}-trailing`} paddingLeft={1} flexShrink={0} display="none" hover={{ scope, display: 'flex' }}>
+          {trailing}
+        </Box>
+      )
     const lineEls = shape.lines.map(l =>
       l.kind === 'row' ? (
-        <Box key={l.row.id} flexDirection="column" {...(l.scope ? { hover: { scope: l.scope } } : {})}>
+        <Box
+          key={l.row.id}
+          flexDirection={l.row.trailing === undefined ? 'column' : 'row'}
+          {...(l.scope ? { hover: { scope: l.scope } } : {})}
+        >
           {l.row.value}
+          {trailingOf(l.row.id, l.row.trailing, l.scope)}
         </Box>
       ) : l.kind === 'cells' ? (
-        // 每一格自己是一個 hover scope：滑鼠在哪一格上，說明欄就顯示哪一個
-        <Box key={l.row.id} flexDirection="row" gap={l.gap} paddingLeft={l.indent}>
-          {l.cells.map(c => (
-            <Box
-              key={c.id}
-              flexDirection="row"
-              flexShrink={0}
-              {...(c.width !== undefined ? { width: c.width } : {})}
-              {...(c.scope ? { hover: { scope: c.scope } } : {})}
-            >
-              <Text dimColor>{l.mark}</Text>
-              {c.value}
+        // 每一格自己是一個 hover scope：滑鼠在哪一格上，說明欄就顯示哪一個。
+        // 欄與欄之間的間隔畫一條暗色直線，眼睛順著欄往下讀（格子是先由上往下排滿一欄）
+        <Box key={l.row.id} flexDirection="row" paddingLeft={l.indent}>
+          {l.cells.map((c, i) => (
+            <Box key={`${c.id}-column`} flexDirection="row" flexShrink={0}>
+              {i > 0 && (
+                <Box key={`${c.id}-sep`} width={l.gap} flexShrink={0}>
+                  <Text dimColor>│</Text>
+                </Box>
+              )}
+              <Box
+                key={c.id}
+                flexDirection="row"
+                flexShrink={0}
+                {...(c.width !== undefined ? { width: c.width } : {})}
+                {...(c.scope ? { hover: { scope: c.scope } } : {})}
+              >
+                <Text dimColor>{l.mark}</Text>
+                {c.value}
+                {trailingOf(c.id, c.trailing, c.scope)}
+              </Box>
             </Box>
           ))}
         </Box>
@@ -2505,19 +2610,38 @@ export const register: Register = (on, options) => {
         <Text> </Text>
       </Box>
     )
+    // 沒有列表時顯示的那一行也佔掉一行空白
+    const isEmpty = content.emptyText !== undefined && content.rows.length === 0
+    const spareRows = Math.max(0, shape.spareRows - (isEmpty ? 1 : 0))
     const tabBody = (
       <Box key="b-body" flexDirection="column">
         {content.top}
-        {content.emptyText !== undefined && content.rows.length === 0 && <Text dimColor>{content.emptyText}</Text>}
+        {isEmpty && <Text dimColor>{content.emptyText}</Text>}
         {lineEls}
+        {spareRows > 0 && <Box key="spare" height={spareRows} />}
         {detailArea}
         {content.bottom}
+        {isActionsInside && content.actions}
+      </Box>
+    )
+    // 操作疊在下框線上時頭尾各留一格，和翻頁鍵一樣
+    const actionsFoot = isActionsOnBorder && (
+      <Box key="actions" flexDirection="row">
+        <Text> </Text>
+        {content.actions}
+        <Text> </Text>
       </Box>
     )
 
-    // 一個框：暗色圓角框線，標題疊在上框線上，`foot` 疊在下框線的右端。
+    // 一個框：暗色圓角框線，標題疊在上框線上，`foot` 疊在下框線的右端、`footLeft` 疊在左端。
     // 引擎的框線不能嵌文字，所以標題另外用 absolute 蓋在框線那一行上
-    const framed = (key: string, title: JSX.Element, body: JSX.Element, foot?: JSX.Element | false) => (
+    const framed = (
+      key: string,
+      title: JSX.Element,
+      body: JSX.Element,
+      foot?: JSX.Element | false,
+      footLeft?: JSX.Element | false,
+    ) => (
       <Box key={key} flexDirection="column" position="relative">
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           {body}
@@ -2525,6 +2649,11 @@ export const register: Register = (on, options) => {
         <Box key={`${key}-title`} position="absolute" top={0} left={2} flexDirection="row">
           {title}
         </Box>
+        {footLeft && (
+          <Box key={`${key}-foot-left`} position="absolute" bottom={0} left={2} flexDirection="row">
+            {footLeft}
+          </Box>
+        )}
         {foot && (
           <Box key={`${key}-foot`} position="absolute" bottom={0} right={2} flexDirection="row">
             {foot}
@@ -2537,7 +2666,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {framed('card-a', <Text bold> 狀態 </Text>, stateBody)}
         {!isTabsOnBorder && tabBar}
-        {framed('card-b', isTabsOnBorder ? tabBar : <Text />, tabBody, pager)}
+        {framed('card-b', isTabsOnBorder ? tabBar : <Text />, tabBody, pager, actionsFoot)}
       </Box>
     )
   })
