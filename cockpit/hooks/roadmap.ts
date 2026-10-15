@@ -379,6 +379,53 @@ export function roadmapWatch() {
   }
 }
 
+/** 畫面上路線圖的來源：見 `roadmapSource` */
+export type RoadmapSource = {
+  /**
+   * 一件事之後要放上畫面的 efforts；不必重讀、讀到的和上次給出去的一樣、或被更新的一輪蓋過，都是 undefined。
+   * `fs` 接在專案根目錄底下。跟路線圖無關的事不碰 `fs`。
+   */
+  next: (event: RoadmapEvent, fs: RoadmapFs) => Promise<Effort[] | undefined>
+  /** `/clear` 之後畫面已經清空：記著的目錄、指紋與上次給出去的都不算數 */
+  reset: () => void
+}
+
+/**
+ * 畫面上的路線圖從哪來：effort 放在哪個目錄（照專案的 tracker 文件，只在重新開啟或它被寫時重看）、
+ * 什麼時候重讀（`roadmapWatch`）、讀到的跟上次給出去的一不一樣，都在這裡決定。
+ * 文件說是線上的 tracker 就沒有路線圖，給一次空的。
+ */
+export function roadmapSource(): RoadmapSource {
+  let watch = roadmapWatch()
+  // undefined：還沒看過 tracker 文件；null：沒有路線圖（線上的 tracker）
+  let root: string | null | undefined
+  let shown: string | undefined
+  const give = (efforts: Effort[]) => {
+    const json = JSON.stringify(efforts)
+    if (json === shown) return undefined
+    shown = json
+    return efforts
+  }
+  return {
+    next: async (event, fs) => {
+      // 沒成功寫進去、被擋下沒跑：檔案沒變
+      if ((event.kind === 'wrote' && !event.isOk) || (event.kind === 'ran' && event.isBlocked)) return undefined
+      // tracker 文件被改了，目錄可能換了：當成重新開啟，一律重讀
+      const isTrackerDoc = event.kind === 'wrote' && event.isOk && tidy(event.path).endsWith(TRACKER_DOC)
+      if (root === null && !isTrackerDoc && event.kind !== 'open') return undefined
+      if (root === undefined || event.kind === 'open' || isTrackerDoc) root = trackerRoot(await fs.read(TRACKER_DOC)) ?? null
+      if (root === null) return give([])
+      const efforts = await watch(isTrackerDoc ? { kind: 'open' } : event, fs, root)
+      return efforts === undefined ? undefined : give(efforts)
+    },
+    reset: () => {
+      watch = roadmapWatch()
+      root = undefined
+      shown = undefined
+    },
+  }
+}
+
 /** 路線圖在 [任務] 裡的一行；文字都已經裁到放得下 */
 export type RoadmapRow =
   /** 一個 effort：`label` 是「▸ 名稱」；`stage` 太窄時拿掉；`count` 沒有票時是空的 */

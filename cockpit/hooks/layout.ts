@@ -61,6 +61,11 @@ export type Frame = {
   inlineRows: number
   /** 下方框裡固定在頂端與底端、不分頁的行數 */
   fixedRows: number
+  /**
+   * 要翻頁時固定的行數（翻頁鍵佔掉下框線的右端，疊在那裡的東西退回框內）；不給就和 `fixedRows` 一樣。
+   * 有沒有要翻頁要排過才知道：照 `fixedRows` 排不下一頁，就改照它排
+   */
+  pagedFixedRows?: number
   /** 說明欄一行幾格；用來算這一頁最長的說明要幾行 */
   detailColumns: number
   /** 使用者翻到的頁（從 0 起） */
@@ -87,6 +92,8 @@ export type Layout<T> = {
   lines: Line<T>[]
   page: number
   pageCount: number
+  /** 照 `fixedRows` 排不下一頁，改照 `pagedFixedRows` 排了 */
+  isPaged: boolean
   /** 說明欄的文字行數（另有一行標題）；0 表示這一頁不顯示說明欄 */
   detailRows: number
   /** 下方框撐到面板底時，列表與說明欄（沒有說明欄時是底端）之間要補的空行數 */
@@ -160,7 +167,11 @@ export function layout<T>(rows: readonly Row<T>[], frame: Frame): Layout<T> {
   const detailRows = detailRowsFor(room)
   // 說明欄是一行標題加文字
   const detailCost = detailRows > 0 ? detailRows + 1 : 0
-  const pages = pack(rows, Math.max(1, room - frame.fixedRows), detailCost)
+  const single = pack(rows, Math.max(1, room - frame.fixedRows), detailCost)
+  const isPaged = single.length > 1
+  const fixedRows = isPaged ? (frame.pagedFixedRows ?? frame.fixedRows) : frame.fixedRows
+  // 只重排分頁；說明的折行（整個分頁的每一則）最後只算一次
+  const pages = fixedRows === frame.fixedRows ? single : pack(rows, Math.max(1, room - fixedRows), detailCost)
 
   const followed =
     frame.followId === undefined
@@ -195,7 +206,7 @@ export function layout<T>(rows: readonly Row<T>[], frame: Frame): Layout<T> {
   const hasDetail = details.length > 0
   const free = frame.isInline
     ? 0
-    : Math.max(0, room - frame.fixedRows - lines.length - (hasDetail ? detailCost : 0))
+    : Math.max(0, room - fixedRows - lines.length - (hasDetail ? detailCost : 0))
   // 照內容反算：這個分頁所有說明裡最長的那一則要幾行（不只這一頁，翻頁時說明欄才不會忽高忽低）
   const texts = rows.flatMap(r => (r.cells !== undefined ? r.cells.map(c => c.detail) : [r.detail]))
   const needed = Math.max(0, ...texts.map(t => (t === undefined ? 0 : wrapText(t, frame.detailColumns).length)))
@@ -204,6 +215,7 @@ export function layout<T>(rows: readonly Row<T>[], frame: Frame): Layout<T> {
     lines,
     page: at,
     pageCount: pages.length,
+    isPaged,
     detailRows: hasDetail ? detailRows + grown : 0,
     spareRows: free - grown,
     details,

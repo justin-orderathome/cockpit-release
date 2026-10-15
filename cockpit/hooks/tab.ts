@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Row } from './layout'
+import type { Indicator } from './release'
 
 /** 引擎給的畫面元素；有些介面沒有下拉選單或輸入框 */
 export type Elements = ReturnType<EngineInterface['ui']['resolve']>
@@ -12,6 +13,8 @@ export type TabContext = {
   cols: number
   /** 強調色 */
   accent: string
+  /** 外框已經讀好的更新標示（[設定] 也要畫）；沒有是 undefined */
+  indicator: Indicator | undefined
 }
 
 /**

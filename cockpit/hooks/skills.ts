@@ -1,5 +1,5 @@
 import type { CommandEntry, FrontmatterEntry, SkillGroup, SkillItem, SkillOverrides } from '../types'
-import { HOWTO_PARTS, howtoCount } from './howto'
+import { howtoCount } from './howto'
 import type { Howtos } from './howto'
 import { cachedFor } from './translate'
 import type { Translations } from './translate'
@@ -174,12 +174,13 @@ const keyOf = (value: unknown, version: number | undefined): unknown => (version
 
 /**
  * 記得上一份目錄的 `skillCatalog`：原料跟上次一樣就給上次那一份，`listed` 與 `groups` 也各自記著上次的結果。
- * 分組要排序、要算每個說明的雜湊，而搜尋框每打一個字都會重畫，清單本身卻沒變。
+ * 分組要排序、要算每個說明的雜湊，而面板每次重畫都會要目錄，清單本身卻沒變。
  * 從狀態讀出來的原料每次都是新物件，所以畫面那邊連同 version 一起給，照 version 比；沒給 version 才照物件比。
+ * 沒給 version 的呼叫不蓋掉照 version 記著的那一份：物件每次都不同，記了也比不中，還會讓下一次照 version 的重新分組。
  */
 export function catalogCache(): (inputs: CatalogInputs, versions?: CatalogVersions) => SkillCatalog {
   const keys = ['commands', 'frontmatter', 'overrides', 'sources'] as const
-  let last: { keys: unknown[]; catalog: SkillCatalog } | undefined
+  let last: { keys: unknown[]; catalog: SkillCatalog; isVersioned: boolean } | undefined
   return (inputs, versions) => {
     const now = keys.map(k => keyOf(inputs[k], versions?.[k]))
     if (last !== undefined && now.every((key, i) => last?.keys[i] === key)) return last.catalog
@@ -196,25 +197,9 @@ export function catalogCache(): (inputs: CatalogInputs, versions?: CatalogVersio
         return grouped.groups
       },
     }
-    last = { keys: now, catalog }
+    if (versions !== undefined || last?.isVersioned !== true) last = { keys: now, catalog, isVersioned: versions !== undefined }
     return catalog
   }
-}
-
-/** 搜尋：比對名稱、說明與四項用法（不分大小寫），只留有符合項目的組。 */
-export function filterSkills(groups: readonly SkillGroup[], query: string): SkillGroup[] {
-  const q = query.trim().toLowerCase()
-  if (q === '') return [...groups]
-  return groups
-    .map(g => ({
-      ...g,
-      items: g.items.filter(i =>
-        [i.name, i.summary, i.description, ...HOWTO_PARTS.flatMap(p => i.howto?.[p.key] ?? [])].some(s =>
-          s.toLowerCase().includes(q),
-        ),
-      ),
-    }))
-    .filter(g => g.items.length > 0)
 }
 
 /**
@@ -247,10 +232,6 @@ export function categorize(
   return result
 }
 
-/** 搜尋時的分類：每個分類只留有符合項目的組，沒有符合的分類拿掉。 */
-export const filterCategories = (categories: readonly SkillCategory[], query: string): SkillCategory[] =>
-  categories.map(c => ({ ...c, groups: filterSkills(c.groups, query) })).filter(c => c.groups.length > 0)
-
 /** [SKILL] 這一次要顯示的東西：哪幾組、哪個分類標在分頁籤上、分類標題列畫在哪、頂端佔幾行 */
 export type SkillView = {
   /** 分頁籤上選中的分類；沒有分類時沒有 */
@@ -259,28 +240,20 @@ export type SkillView = {
   groups: SkillGroup[]
   /** 組 id → 排在它前面的分類標題（只有列出的每個分類的第一組有） */
   before: Map<string, string>
-  /** 平常看一個分類時，它的 token 數接在頂端分頁籤那一列的右端，列表裡不再有它的標題列；搜尋時標題列跟著列表 */
+  /** 看一個分類時，它的 token 數接在頂端分頁籤那一列的右端，列表裡不再有它的標題列 */
   isHeadOnTop: boolean
-  /** 頂端固定的行數：有分類時是分頁籤那一列；沒有分類時沒有（搜尋框在底部） */
+  /** 頂端固定的行數：有分類時是分頁籤那一列；沒有分類時沒有 */
   topRows: number
 }
 
 /**
- * [SKILL] 顯示哪些組。有分類時一次看選中的那個分類（沒選過或已經不在了就看第一個）；
- * 搜尋時列出所有有符合項目的分類。沒有分類時照搜尋篩全部的組。
+ * [SKILL] 顯示哪些組。有分類時一次看選中的那個分類（沒選過或已經不在了就看第一個）；沒有分類時是全部的組。
  */
-export function skillView(
-  all: readonly SkillGroup[],
-  categories: readonly SkillCategory[] | undefined,
-  chosen: string,
-  query: string,
-): SkillView {
-  if (categories === undefined)
-    return { groups: filterSkills(all, query), before: new Map(), isHeadOnTop: false, topRows: 0 }
-  const isSearching = query.trim() !== ''
+export function skillView(all: readonly SkillGroup[], categories: readonly SkillCategory[] | undefined, chosen: string): SkillView {
+  if (categories === undefined) return { groups: [...all], before: new Map(), isHeadOnTop: false, topRows: 0 }
   const picked = categories.find(c => c.name === chosen) ?? categories[0]
-  const shown = isSearching ? filterCategories(categories, query) : picked ? [picked] : []
-  const isHeadOnTop = !isSearching && picked !== undefined
+  const shown = picked ? [picked] : []
+  const isHeadOnTop = picked !== undefined
   return {
     ...(picked === undefined ? {} : { picked }),
     groups: shown.flatMap(c => c.groups),

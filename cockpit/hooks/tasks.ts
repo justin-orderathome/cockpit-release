@@ -366,6 +366,48 @@ export function summarize(all: readonly TaskItem[], now: number): TaskSummary {
   }
 }
 
+/** 任務列裡會隨時間變的部分：畫面那一側（`ticking.tsx`）拿它往後推 */
+export type RowTiming = Pick<TaskRow, 'status' | 'percent' | 'remainingMs' | 'overdueMs' | 'elapsedMs'>
+
+/** 只放有值的欄位：要當 `Client` 的 props，引擎不收 undefined */
+export const timingOf = (row: TaskRow): RowTiming => ({
+  status: row.status,
+  ...(row.percent === undefined ? {} : { percent: row.percent }),
+  ...(row.remainingMs === undefined ? {} : { remainingMs: row.remainingMs }),
+  ...(row.overdueMs === undefined ? {} : { overdueMs: row.overdueMs }),
+  ...(row.elapsedMs === undefined ? {} : { elapsedMs: row.elapsedMs }),
+})
+
+/**
+ * 一個任務列過了 `ms` 之後的樣子：只有進行中的會變，算法和 `summarize` 一樣（預測的總時間不變）。
+ * 預測的總時間從列上的數字倒推：超時的是「已過 − 超出」，其餘是「已過 + 剩下」。
+ */
+export function advanceRow<R extends RowTiming>(row: R, ms: number): R {
+  if (row.status !== 'in_progress' || row.elapsedMs === undefined || ms <= 0) return row
+  const elapsed = row.elapsedMs + ms
+  const predicted =
+    row.overdueMs !== undefined
+      ? row.elapsedMs - row.overdueMs
+      : row.remainingMs === undefined
+        ? undefined
+        : row.elapsedMs + row.remainingMs
+  if (predicted === undefined || predicted <= 0) return { ...row, elapsedMs: elapsed }
+  return {
+    ...row,
+    percent: Math.min(99, Math.floor((elapsed / predicted) * 100)),
+    remainingMs: Math.max(0, predicted - elapsed),
+    overdueMs: elapsed > predicted ? elapsed - predicted : undefined,
+    elapsedMs: elapsed,
+  }
+}
+
+/** 標題列的「還需約」過了 `ms` 之後是多少：`rows` 是主清單還沒完成的列（和 `summarize` 一樣全都有預測才算） */
+export function remainingAfter(rows: readonly RowTiming[], ms: number): number | undefined {
+  const later = rows.map(r => advanceRow(r, ms))
+  if (later.length === 0 || later.some(r => r.remainingMs === undefined)) return undefined
+  return later.reduce((sum, r) => sum + (r.remainingMs ?? 0), 0)
+}
+
 /** [任務] 的一行：一個任務，或一行 subagent 列。`depth` 是縮排層數。 */
 export type TreeRow =
   | { kind: 'task'; id: string; depth: number; group?: { id: string; label: string }; task: TaskRow }
@@ -409,10 +451,27 @@ const MAX_DEPTH = 3
 /** 說明區的狀態字樣：被停掉與出錯在列上都是 ✗，在這裡分開寫 */
 const STATE_WORDS: Record<SubagentState, string> = { running: '進行中', done: '完成', stopped: '被停掉', failed: '出錯' }
 
-/** subagent 列的說明：`subagent「描述」 · 類型`、`完整 model id · 深度 · 狀態 耗時`、`prompt：開頭幾行` */
+/** 某一刻的時與分（HH:MM，本地時間）；`ms` 來自引擎的時鐘 */
+export function clockOf(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * subagent 列的說明：`subagent「描述」 · 類型`、`完整 model id · 深度 · 狀態`、`prompt：開頭幾行`。
+ * 結束的狀態帶總耗時；進行中的寫派出的時刻（說明區是一般文字，不會每秒更新，耗時看列上那一欄）。
+ */
 function agentDetail(g: Subagent, state: SubagentState, elapsedMs: number | undefined): string {
   const head = g.type === undefined ? `subagent「${g.label}」` : `subagent「${g.label}」 · ${g.type}`
-  const status = elapsedMs === undefined ? STATE_WORDS[state] : `${STATE_WORDS[state]} ${formatDuration(elapsedMs)}`
+  const status =
+    state === 'running'
+      ? g.startedAt === undefined
+        ? STATE_WORDS[state]
+        : `${STATE_WORDS[state]}（${clockOf(g.startedAt)} 派出）`
+      : elapsedMs === undefined
+        ? STATE_WORDS[state]
+        : `${STATE_WORDS[state]} ${formatDuration(elapsedMs)}`
   const model = g.model === undefined ? [] : [g.model.model, ...(g.model.effort === undefined ? [] : [g.model.effort])]
   return [head, [...model, status].join(' · '), ...(g.prompt ? [`prompt：${g.prompt}`] : [])].join('\n')
 }
@@ -574,11 +633,15 @@ export function agentLabels(view: TaskView, width: number): Map<string, string> 
   return new Map(agents.flatMap((r, i) => (labels[i] === undefined ? [] : [[r.id, labels[i]] as const])))
 }
 
+/** subagent 列的耗時欄：補到欄寬；不知道何時派出的是 — */
+export const agentTime = (elapsedMs: number | undefined): string =>
+  (elapsedMs === undefined ? '—' : formatDuration(elapsedMs)).padStart(TIME - 1)
+
 export function agentCells(row: Extract<TreeRow, { kind: 'agent' }>, width: number): AgentCells {
   return {
     ...AGENT_LOOKS[row.state],
     title: row.total > 0 ? `${row.label} ${row.doneCount}/${row.total}` : row.label,
-    time: (row.elapsedMs === undefined ? '—' : formatDuration(row.elapsedMs)).padStart(TIME - 1),
+    time: agentTime(row.elapsedMs),
     isEnded: isEnded(row),
     canDismiss: taskColumns(width).showX,
   }
@@ -588,7 +651,7 @@ export function agentCells(row: Extract<TreeRow, { kind: 'agent' }>, width: numb
  * 一個任務列要畫哪些欄。`width` 是這一列可用的寬度（已扣掉縮排）；
  * 不夠時依序拿掉：進度條 → % → ×。進度條與百分比只有進行中的任務才畫。
  */
-export function taskCells(row: TaskRow, width: number): TaskCells {
+export function taskCells(row: RowTiming, width: number): TaskCells {
   const columns = taskColumns(width)
   const isRunning = row.status === 'in_progress'
   const time =
