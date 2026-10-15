@@ -153,6 +153,8 @@ export function parseEffort(input: {
   name: string
   map?: string
   hasSpec: boolean
+  /** 規格書的內容；`Status:` 寫完成時，沒有自己的實作票也算已完成 */
+  spec?: string
   issues: readonly { file: string; text: string }[]
   mtimeMs: number
   /** 放 effort 的目錄；沒給就是 `.scratch` */
@@ -174,6 +176,8 @@ export function parseEffort(input: {
     .map(l => l.trim())
     .filter(l => l !== '' && !/^[（(].*[）)]$/.test(l))
   const isArrived = hasMap && decisions.every(t => t.state === 'done') && fog.length === 0
+  // 實作票開在別的 effort 時，規格書自己的 Status 說它做完了沒
+  const specDone = DONE_STATUSES.has((field(input.spec ?? '', 'Status') ?? '').toLowerCase().split(/\s/)[0] ?? '')
   const stage: EffortStage =
     hasMap && !isArrived
       ? 'mapping'
@@ -182,7 +186,9 @@ export function parseEffort(input: {
           ? 'done'
           : 'building'
         : input.hasSpec
-          ? 'needsTickets'
+          ? specDone
+            ? 'done'
+            : 'needsTickets'
           : hasMap
             ? 'needsSpec'
             : parsed.length > 0 && [...decisions, ...builds].every(t => t.state === 'done')
@@ -279,8 +285,9 @@ async function readListed(fs: RoadmapFs, listing: Listing, root: string, known?:
       const hasSpec = files.some(f => f.name === 'spec.md')
       let effort: Effort | undefined
       if (hasMap || hasSpec || issueFiles.length > 0) {
-        const [map, issues] = await Promise.all([
+        const [map, spec, issues] = await Promise.all([
           hasMap ? read(`${dir}/map.md`) : undefined,
+          hasSpec ? read(`${dir}/spec.md`) : undefined,
           Promise.all(issueFiles.map(async f => ({ file: f.name, text: await read(`${dir}/issues/${f.name}`) }))),
         ])
         effort = parseEffort({
@@ -288,6 +295,7 @@ async function readListed(fs: RoadmapFs, listing: Listing, root: string, known?:
           root,
           map,
           hasSpec,
+          spec,
           issues,
           mtimeMs: Math.max(0, ...files.map(f => f.mtimeMs), ...issueFiles.map(f => f.mtimeMs)),
         })

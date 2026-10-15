@@ -148,41 +148,55 @@ export type CatalogInputs = {
   sources: SkillSources
 }
 
+/** 四份原料各自的 version（`$.state.get` 回傳的）：一樣就是沒變，不必看內容 */
+export type CatalogVersions = Record<keyof CatalogInputs, number>
+
 /**
  * 一份 [SKILL] 目錄：
  * - `listed`：會列在 [SKILL] 裡的指令（不含隱藏的），翻譯與整理用法的對象。
- * - `groups`：分好的組；沒給翻譯或用法就當作都沒有（設定關掉時）。
+ * - `groups`：分好的組；沒給翻譯或用法就當作都沒有（設定關掉時）。翻譯與用法有給 version 就照 version 判斷換了沒。
  */
 export type SkillCatalog = {
   listed: () => CommandEntry[]
-  groups: (shown?: { translations?: Translations; howtos?: Howtos }) => SkillGroup[]
+  groups: (shown?: {
+    translations?: Translations
+    howtos?: Howtos
+    versions?: { translations?: number; howtos?: number }
+  }) => SkillGroup[]
 }
 
 // 沒給翻譯或用法時用的空表：固定同一個，下面的記憶才比得出「沒變」
 const NO_TRANSLATIONS: Translations = {}
 const NO_HOWTOS: Howtos = {}
 
+/** 判斷一份原料換了沒用的鍵：有 version 就用 version（讀出來的每次都是新物件），沒有就用物件本身 */
+const keyOf = (value: unknown, version: number | undefined): unknown => (version === undefined ? value : `v${version}`)
+
 /**
- * 記得上一份目錄的 `skillCatalog`：原料（照同一個物件比）跟上次一樣就給上次那一份，`listed` 與 `groups`
- * 也各自記著上次的結果。分組要排序、要算每個說明的雜湊，而搜尋框每打一個字都會重畫，清單本身卻沒變。
+ * 記得上一份目錄的 `skillCatalog`：原料跟上次一樣就給上次那一份，`listed` 與 `groups` 也各自記著上次的結果。
+ * 分組要排序、要算每個說明的雜湊，而搜尋框每打一個字都會重畫，清單本身卻沒變。
+ * 從狀態讀出來的原料每次都是新物件，所以畫面那邊連同 version 一起給，照 version 比；沒給 version 才照物件比。
  */
-export function catalogCache(): (inputs: CatalogInputs) => SkillCatalog {
-  let last: { inputs: CatalogInputs; catalog: SkillCatalog } | undefined
-  return inputs => {
-    const keys = ['commands', 'frontmatter', 'overrides', 'sources'] as const
-    if (last !== undefined && keys.every(k => last?.inputs[k] === inputs[k])) return last.catalog
+export function catalogCache(): (inputs: CatalogInputs, versions?: CatalogVersions) => SkillCatalog {
+  const keys = ['commands', 'frontmatter', 'overrides', 'sources'] as const
+  let last: { keys: unknown[]; catalog: SkillCatalog } | undefined
+  return (inputs, versions) => {
+    const now = keys.map(k => keyOf(inputs[k], versions?.[k]))
+    if (last !== undefined && now.every((key, i) => last?.keys[i] === key)) return last.catalog
     const { commands, frontmatter, overrides, sources } = inputs
     let listed: CommandEntry[] | undefined
-    let grouped: { translations: Translations; howtos: Howtos; groups: SkillGroup[] } | undefined
+    let grouped: { translations: unknown; howtos: unknown; groups: SkillGroup[] } | undefined
     const catalog: SkillCatalog = {
       listed: () => (listed ??= listedCommands(commands, frontmatter, overrides, sources)),
-      groups: ({ translations = NO_TRANSLATIONS, howtos = NO_HOWTOS } = {}) => {
-        if (grouped === undefined || grouped.translations !== translations || grouped.howtos !== howtos)
-          grouped = { translations, howtos, groups: groupSkills(commands, frontmatter, overrides, translations, howtos, sources) }
+      groups: ({ translations = NO_TRANSLATIONS, howtos = NO_HOWTOS, versions: shown = {} } = {}) => {
+        const t = keyOf(translations, shown.translations)
+        const h = keyOf(howtos, shown.howtos)
+        if (grouped === undefined || grouped.translations !== t || grouped.howtos !== h)
+          grouped = { translations: t, howtos: h, groups: groupSkills(commands, frontmatter, overrides, translations, howtos, sources) }
         return grouped.groups
       },
     }
-    last = { inputs, catalog }
+    last = { keys: now, catalog }
     return catalog
   }
 }

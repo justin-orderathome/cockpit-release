@@ -213,6 +213,8 @@ declare module 'claude-code' {
       minute: number
       /** 任務、subagent 列與跟隨狀態 */
       board: TaskBoard
+      /** 主對話清單的完成數與總數（分頁列的進度）；任務板寫入時順便算，數字變了才寫 */
+      progress: { doneCount: number; total: number }
       /** 每秒跳動一次，讓進行中任務的耗時重畫 */
       tick: number
       tab: Tab

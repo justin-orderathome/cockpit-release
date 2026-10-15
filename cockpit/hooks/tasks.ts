@@ -278,6 +278,14 @@ export const hasRunning = (board: TaskBoard) =>
   board.tasks.some(t => t.status === 'in_progress' && isShown(t)) ||
   board.agents.some(g => !isEnded(g) && !g.isDismissed)
 
+/** 主對話清單的完成數與總數（分頁列的進度）；和 `viewTasks(...).main` 的兩個數字一樣，不必知道現在幾點 */
+export type Progress = { doneCount: number; total: number }
+
+export function progressOf(board: TaskBoard): Progress {
+  const tasks = board.tasks.filter(t => t.agentId === undefined && !t.isDismissed)
+  return { doneCount: tasks.filter(t => t.status === 'completed').length, total: tasks.length }
+}
+
 export type TaskRow = {
   id: string
   title: string

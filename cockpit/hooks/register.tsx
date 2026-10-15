@@ -20,6 +20,7 @@ import type { Field, Settings } from './config'
 import type { Ask } from './ask'
 import { rootedAt, safeFiles, tidy, under } from './files'
 import type { Files } from './files'
+import { makeCounters } from './counters'
 import { composeFill } from './fill'
 import { applyHandled, handledTickets, handlerMarks } from './handled'
 import type { Handled, HandledEvent } from './handled'
@@ -36,6 +37,7 @@ import type { Indicator, Install } from './release'
 import { startTab, storedList, storedText, storedTranslations, toggled } from './remembered'
 import { TRACKER_DOC, roadmapWatch, touchesRoadmap, trackerRoot, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
+import { changes, isSame } from './same'
 import {
   EMPTY_OVERRIDES,
   NO_SOURCES,
@@ -66,8 +68,20 @@ import type { Press, SwitchState } from './switches'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
 import type { Elements, TabContent, TabContext } from './tab'
-import { EMPTY_BOARD, agentCells, agentLabels, applyTask, formatDuration, hasRunning, isEnded, taskCells, timeStamp, viewTasks } from './tasks'
-import type { TaskEvent, TaskView } from './tasks'
+import {
+  EMPTY_BOARD,
+  agentCells,
+  agentLabels,
+  applyTask,
+  formatDuration,
+  hasRunning,
+  isEnded,
+  progressOf,
+  taskCells,
+  timeStamp,
+  viewTasks,
+} from './tasks'
+import type { Progress, TaskEvent } from './tasks'
 import { translateAll } from './translate'
 import type { Translations } from './translate'
 import { makeUpdater } from './updater'
@@ -105,6 +119,8 @@ const usage = atom({ plugin: 'cockpit', key: 'usage' } as const, { rateLimits: [
 const alerted = atom({ plugin: 'cockpit', key: 'alerted' } as const, [] as string[])
 const minute = atom({ plugin: 'cockpit', key: 'minute' } as const, 0)
 const board = atom({ plugin: 'cockpit', key: 'board' } as const, EMPTY_BOARD as TaskBoard)
+// 任務板的完成數與總數：外框（分頁列的進度）只讀這個，任務板寫入時順便算、數字變了才寫
+const progress = atom({ plugin: 'cockpit', key: 'progress' } as const, { doneCount: 0, total: 0 } as Progress)
 const tick = atom({ plugin: 'cockpit', key: 'tick' } as const, 0)
 const tab = atom({ plugin: 'cockpit', key: 'tab' } as const, 'tasks' as Tab)
 const pages = atom(
@@ -168,6 +184,8 @@ let hasMadeHowtos = false
 let skillListPage = 0
 // 路線圖什麼時候要重讀，由 roadmap 自己記（模組重載時重來）
 const freshRoadmap = roadmapWatch()
+// 作者量耗時與次數用的計數器：session 開始時看 COCKPIT_COUNTERS 決定開不開，關著時什麼都不做（模組重載時重來）
+const counters = makeCounters()
 
 // 以下是為了少問引擎而記在模組裡的東西；模組重載時重來，session.start 時也清掉。
 /** 整個 session 不會變的兩個目錄：問過一次就記著 */
@@ -191,6 +209,32 @@ let shownTimes = ''
 /** 用法每整理好幾個才存一次（整份快取每次都要重寫） */
 const HOWTO_SAVE_EVERY = 10
 
+// ── 一起寫與背景工作 ─────────────────────────────────────
+
+/**
+ * 一筆要寫的狀態。一件事先把要寫的值都讀好、算好，收成這樣的一串，最後用 `writeAll` 一起寫：
+ * 同一刻接連寫的值引擎只重畫一次；邊讀邊寫的話，每次寫入之間都夾著讀，會落在不同的畫格各畫一次。
+ * 每一筆照樣寫明自己的 atom（引擎靠這個列出模組讀寫了什麼）。
+ */
+type Write = () => Promise<unknown>
+
+/** 一起寫出去（沒有要寫的就什麼都不做） */
+async function writeAll(writes: readonly Write[]) {
+  if (writes.length > 0) await Promise.all(writes.map(w => w()))
+}
+
+/**
+ * 事件的後續工作排在背景：hook 不必等它，`next` 之後馬上回傳。
+ * 一件做完才做下一件，照事件發生的順序（派出、結束、清單更新不會顛倒）；出錯只略過那一件。
+ */
+let backlog: Promise<void> = Promise.resolve()
+function later(job: () => Promise<unknown>) {
+  backlog = backlog.then(job).then(
+    () => {},
+    () => {},
+  )
+}
+
 // ── 模型與深度 ───────────────────────────────────────────
 
 /** 從 /config 的列或 settings 讀出使用者選的深度，兩者皆無則回傳 ''。 */
@@ -209,24 +253,25 @@ async function readEffort($: EngineInterface): Promise<string> {
 /** 重新讀取模型；選的深度只在尚未得知時才從設定補上，之後以 /effort 的參數為準。 */
 async function refresh($: EngineInterface) {
   const current = await $.session.model()
-  await update($, model, () => current)
+  if (!isSame(await read($, model), current)) await update($, model, () => current)
   if ((await read($, chosenEffort)) !== '') return
   const level = await readEffort($)
-  if (level) await update($, chosenEffort, known => known || level)
+  const fill = (known: string) => known || level
+  if (level && changes(await read($, chosenEffort), fill)) await update($, chosenEffort, fill)
 }
 
 /** 以 slash command 切換，完成後更新顯示。 */
 async function switchTo($: EngineInterface, command: 'model' | 'effort', value: string) {
-  await update($, switching, () => command)
+  if (!isSame(await read($, switching), command)) await update($, switching, () => command)
   try {
     await $.command.run({ command, args: value })
-    if (command === 'effort') await update($, chosenEffort, () => value)
+    if (command === 'effort' && !isSame(await read($, chosenEffort), value)) await update($, chosenEffort, () => value)
     await refresh($)
     $.ui.toast(`${command === 'model' ? '模型' : '深度'}已切換為 ${value}`)
   } catch (err) {
     $.ui.toast(`切換失敗：${reasonOf(err)}`)
   } finally {
-    await update($, switching, () => '')
+    if (!isSame(await read($, switching), '')) await update($, switching, () => '')
   }
 }
 
@@ -245,15 +290,17 @@ const usageOf = (reported: {
 
 /** 寫入用量並依 toast 門檻提醒；`isFirst` 時只記下已超過的，不跳 toast。 */
 async function applyUsage($: EngineInterface, snapshot: UsageSnapshot, isFirst: boolean) {
-  // 一樣的用量不必再寫（寫了就重畫）
+  // 一樣的用量不必再寫（寫了就重畫）；用量與提醒過的門檻先算好再一起寫
   const json = JSON.stringify(snapshot)
+  const writes: Write[] = []
   if (json !== shownUsage) {
     shownUsage = json
-    await update($, usage, () => snapshot)
+    if (!isSame(await read($, usage), snapshot)) writes.push(() => update($, usage, () => snapshot))
   }
   const before = await read($, alerted)
   const checked = checkAlerts(snapshot, config.settings.toast, before, isFirst)
-  if (checked.alerted.join('\n') !== before.join('\n')) await update($, alerted, () => checked.alerted)
+  if (!isSame(before, checked.alerted)) writes.push(() => update($, alerted, () => checked.alerted))
+  await writeAll(writes)
   for (const text of checked.toasts) $.ui.toast(text)
 }
 
@@ -262,6 +309,58 @@ async function loadUsage($: EngineInterface) {
     const u = await $.session.usage()
     await applyUsage($, usageOf(u), true)
   } catch {}
+}
+
+// ── 計數器 ───────────────────────────────────────────────
+// 累加與摘要在 `counters.ts`；這裡只有要碰引擎的：開不開、哪個 session、寫紀錄。
+
+/** session 開始時判斷一次計數器開不開（環境變數 `COCKPIT_COUNTERS` 是 `1` 才開） */
+async function startCounters($: EngineInterface) {
+  let flag: string | undefined
+  try {
+    // 引擎規定變數名稱要直接寫成字面值
+    flag = await $.env.get('COCKPIT_COUNTERS')
+  } catch {}
+  counters.decide(flag)
+}
+
+/** 計數器開著時，紀錄記在哪個 session 名下：每個 session 一份（/clear 之後換一份新的） */
+async function countSession($: EngineInterface) {
+  if (!counters.isOn) return
+  try {
+    counters.session(await $.session.id(), `${await homeDir($)}/.claude/cockpit/counters`)
+  } catch {}
+  void saveCounters($)
+}
+
+/** 一件事件（或計時器回呼）自己的工作做完：記下耗時，寫紀錄 */
+function counted($: EngineInterface, name: string, at: number) {
+  if (!counters.isOn) return
+  counters.leave(name, at)
+  void saveCounters($)
+}
+
+/** 一次 `ui.render` 畫完：記下耗時，寫紀錄 */
+function drawn($: EngineInterface, currentTab: Tab, at: number) {
+  if (!counters.isOn) return
+  counters.rendered(currentTab, at)
+  void saveCounters($)
+}
+
+/** 把摘要寫成這個 session 的紀錄；正在寫時又有新的，寫完再寫一次 */
+async function saveCounters($: EngineInterface) {
+  if (!counters.beginSave()) return
+  do {
+    try {
+      await $.fs.write(counters.path, counters.summary())
+    } catch {}
+  } while (counters.endSave())
+}
+
+/** 問 subagent 的清單（計數器記一次） */
+function listAgents($: EngineInterface) {
+  counters.host('agent.list')
+  return $.agent.list()
 }
 
 // ── 檔案 ─────────────────────────────────────────────────
@@ -275,8 +374,14 @@ async function homeDir($: EngineInterface): Promise<string> {
 /** 引擎的檔案操作包成面板唯一的檔案 interface：讀不到是 undefined、列不出來是空的 */
 const files = ($: EngineInterface): Files =>
   safeFiles({
-    read: path => $.fs.read(path),
-    list: path => $.fs.list(path),
+    read: path => {
+      counters.host('fs.read')
+      return $.fs.read(path)
+    },
+    list: path => {
+      counters.host('fs.list')
+      return $.fs.list(path)
+    },
     write: (path, text) => $.fs.write(path, text),
   })
 
@@ -378,8 +483,8 @@ function updaterPorts($: EngineInterface): UpdaterPorts {
     ask: (question, options) => $.ui.ask(question, options),
     reloadPlugins: async () => (await $.command.run({ command: 'reload-plugins' })).text,
     show: async ({ released, downloaded }) => {
-      if ((await read($, releasedVersion)) !== released) await update($, releasedVersion, () => released)
-      if ((await read($, downloadedVersion)) !== downloaded) await update($, downloadedVersion, () => downloaded)
+      if (!isSame(await read($, releasedVersion), released)) await update($, releasedVersion, () => released)
+      if (!isSame(await read($, downloadedVersion), downloaded)) await update($, downloadedVersion, () => downloaded)
     },
   }
 }
@@ -414,42 +519,54 @@ async function loadPrompts($: EngineInterface) {
   const home = await homeDir($)
   const global = parsePrompts((await files($).read(`${home}/.claude/cockpit/prompts.md`)) ?? '', 'global')
   const projectText = await (await projectFiles($)).read(PROJECT_PROMPTS)
-  await update($, hasProjectPrompts, () => projectText !== undefined)
-  await update($, prompts, () => withProject(global, parsePrompts(projectText ?? '', 'project')))
+  const hasProject = projectText !== undefined
+  const all = withProject(global, parsePrompts(projectText ?? '', 'project'))
+  const writes: Write[] = []
+  if (!isSame(await read($, hasProjectPrompts), hasProject)) writes.push(() => update($, hasProjectPrompts, () => hasProject))
+  if (!isSame(await read($, prompts), all)) writes.push(() => update($, prompts, () => all))
+  await writeAll(writes)
 }
 
 async function loadSkills($: EngineInterface) {
+  // 先把 [SKILL] 要的都讀好、算好，有變的最後一起寫：載入的資料有變也只重畫一次
+  const writes: Write[] = []
   try {
+    counters.host('command.list')
     const list = await $.command.list()
-    await update($, commands, () =>
-      list.map(c => ({ name: c.name, description: c.description, source: c.source, plugin: c.plugin })),
-    )
+    const listed = list.map(c => ({ name: c.name, description: c.description, source: c.source, plugin: c.plugin }))
+    if (!isSame(await read($, commands), listed)) writes.push(() => update($, commands, () => listed))
   } catch {}
   if (!hasFrontmatter) {
     try {
       const u = await $.session.usage({ breakdown: 'summary' })
       const fm = u.context.breakdown?.skills?.skillFrontmatter ?? []
-      await update($, frontmatter, () =>
-        fm.map(f => ({ name: f.name, source: f.source, pluginName: f.pluginName, tokens: f.tokens })),
-      )
+      const entries = fm.map(f => ({ name: f.name, source: f.source, pluginName: f.pluginName, tokens: f.tokens }))
+      if (!isSame(await read($, frontmatter), entries)) writes.push(() => update($, frontmatter, () => entries))
       hasFrontmatter = true
     } catch {}
   }
-  // 開關的狀態只看專案的 settings.local.json；每次切到 [SKILL] 都重讀，/skills 選單改的也看得到
-  await loadSwitches($)
-  const home = await homeDir($)
-  // plugin 組的開關要用完整的鍵；停用了的 plugin 也靠這份清單畫出它的組
-  const installed = installedPlugins(await files($).read(`${home}/${INSTALLED_PLUGINS}`))
-  await update($, installedPluginKeys, () => installed)
-  const text = await files($).read(`${home}/.claude/cockpit/skills.json`)
-  await update($, overrides, () => (text === undefined ? EMPTY_OVERRIDES : parseOverrides(text)))
-  // 用 npx skills 裝的 skill 從哪裡來；沒用過 npx skills 就沒有這個檔
-  const lock = await files($).read(`${home}/.agents/.skill-lock.json`)
-  // 裝在專案裡的（不加 -g）記在專案根目錄的 skills-lock.json；根目錄和找專案 skill 原文時用同一份清單
-  const projectLocks = await Promise.all(
-    (await projectDirs($)).map(async dir => parseSkillLock(await files($).read(under(dir, 'skills-lock.json')))),
-  )
-  await update($, skillSources, () => mergeSkillSources(parseSkillLock(lock), projectLocks))
+  try {
+    // 開關的狀態只看專案的 settings.local.json；每次切到 [SKILL] 都重讀，/skills 選單改的也看得到
+    writes.push(...(await switchWrites($, await (await projectFiles($)).read(LOCAL_SETTINGS))))
+    const home = await homeDir($)
+    // plugin 組的開關要用完整的鍵；停用了的 plugin 也靠這份清單畫出它的組
+    const installed = installedPlugins(await files($).read(`${home}/${INSTALLED_PLUGINS}`))
+    if (!isSame(await read($, installedPluginKeys), installed)) writes.push(() => update($, installedPluginKeys, () => installed))
+    const text = await files($).read(`${home}/.claude/cockpit/skills.json`)
+    const over = text === undefined ? EMPTY_OVERRIDES : parseOverrides(text)
+    if (!isSame(await read($, overrides), over)) writes.push(() => update($, overrides, () => over))
+    // 用 npx skills 裝的 skill 從哪裡來；沒用過 npx skills 就沒有這個檔
+    const lock = await files($).read(`${home}/.agents/.skill-lock.json`)
+    // 裝在專案裡的（不加 -g）記在專案根目錄的 skills-lock.json；根目錄和找專案 skill 原文時用同一份清單
+    const projectLocks = await Promise.all(
+      (await projectDirs($)).map(async dir => parseSkillLock(await files($).read(under(dir, 'skills-lock.json')))),
+    )
+    const sources = mergeSkillSources(parseSkillLock(lock), projectLocks)
+    if (!isSame(await read($, skillSources), sources)) writes.push(() => update($, skillSources, () => sources))
+  } finally {
+    // 中途讀不到時，之前已經讀好的照樣寫上去
+    await writeAll(writes)
+  }
   // 用法排在說明的翻譯之後才整理；兩個開關各管各的
   void (async () => {
     if (config.settings.translate) await translateSkills($)
@@ -479,8 +596,17 @@ async function loadSwitches($: EngineInterface): Promise<string | undefined> {
 }
 
 async function showSwitches($: EngineInterface, text: string | undefined) {
-  await update($, skillSwitches, () => readOverrides(text))
-  await update($, pluginSwitches, () => readEnabledPlugins(text))
+  await writeAll(await switchWrites($, text))
+}
+
+/** settings.local.json 的原文 → 兩份開關狀態要寫的（沒變的不寫） */
+async function switchWrites($: EngineInterface, text: string | undefined): Promise<Write[]> {
+  const writes: Write[] = []
+  const skillState = readOverrides(text)
+  if (!isSame(await read($, skillSwitches), skillState)) writes.push(() => update($, skillSwitches, () => skillState))
+  const pluginState = readEnabledPlugins(text)
+  if (!isSame(await read($, pluginSwitches), pluginState)) writes.push(() => update($, pluginSwitches, () => pluginState))
+  return writes
 }
 
 /**
@@ -549,8 +675,9 @@ async function translateSkills($: EngineInterface) {
         async got => {
           // 這一批一筆都沒翻成就沒有東西要存
           if (Object.keys(got).length === 0) return
-          const next = await update($, translations, prev => ({ ...prev, ...got }))
-          await $.store.set('translations', next)
+          const merge = (prev: Translations) => ({ ...prev, ...got })
+          if (!changes(await read($, translations), merge)) return
+          await $.store.set('translations', await update($, translations, merge))
         },
         missedTranslations,
       ),
@@ -574,7 +701,9 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
         // 每個 skill 都先找原文；要不要重新整理由 makeHowtos 判斷
         const items = await howtoItems((await skillCatalog($)).listed(), dirs, fs)
         // 原文改過的先從畫面上拿掉，舊的用法不留著
-        const known = await update($, howtos, prev => withoutStale(prev, items))
+        const fresh = (prev: Howtos) => withoutStale(prev, items)
+        const before = await read($, howtos)
+        const known = changes(before, fresh) ? await update($, howtos, fresh) : before
         // 畫面每好一個就更新；存檔每幾個一次，最後再補存剩下的
         let unsaved = 0
         const round = await makeHowtos(
@@ -583,7 +712,9 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
           run === 'full' ? {} : known,
           askModel($, 'haiku', 4000),
           async (name, entry) => {
-            const next = await update($, howtos, prev => ({ ...prev, [name]: entry }))
+            const put = (prev: Howtos) => ({ ...prev, [name]: entry })
+            if (!changes(await read($, howtos), put)) return
+            const next = await update($, howtos, put)
             if (++unsaved < HOWTO_SAVE_EVERY) return
             unsaved = 0
             await $.store.set('howtos', next)
@@ -592,7 +723,10 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
         if (unsaved > 0) await $.store.set('howtos', await read($, howtos))
         return round
       },
-      async running => void (await update($, makingHowtos, () => running !== undefined)),
+      async running => {
+        const isRunning = running !== undefined
+        if (!isSame(await read($, makingHowtos), isRunning)) await update($, makingHowtos, () => isRunning)
+      },
     )
     // 已經有一輪在跑：這次不跑，也不另外說什麼（按鈕那時是「用法整理中…」）
     if ('busy' in ran) return
@@ -636,9 +770,12 @@ async function showRoadmap($: EngineInterface, efforts: Effort[]) {
   const json = JSON.stringify(efforts)
   if (json === shownRoadmap) return
   shownRoadmap = json
-  await update($, roadmap, () => efforts)
+  // 路線圖與跟著變的經手先算好，一起寫
+  const writes: Write[] = []
+  if (!isSame(await read($, roadmap), efforts)) writes.push(() => update($, roadmap, () => efforts))
   // 結案的票不再算經手
-  await changeHandled($, { kind: 'closed', open: openTickets(efforts) })
+  writes.push(...(await handledWrites($, { kind: 'closed', open: openTickets(efforts) })))
+  await writeAll(writes)
 }
 
 // ── 經手 ─────────────────────────────────────────────────
@@ -649,9 +786,13 @@ const openTickets = (efforts: readonly Effort[]) =>
 
 /** 改經手的紀錄；沒變就不寫（寫了就重畫） */
 async function changeHandled($: EngineInterface, event: HandledEvent) {
+  await writeAll(await handledWrites($, event))
+}
+
+/** 改經手的紀錄要寫的；沒變就沒有 */
+async function handledWrites($: EngineInterface, event: HandledEvent): Promise<Write[]> {
   const before = await read($, handled)
-  const after = applyHandled(before, event)
-  if (after !== before) await update($, handled, () => after)
+  return isSame(before, applyHandled(before, event)) ? [] : [() => update($, handled, h => applyHandled(h, event))]
 }
 
 /**
@@ -660,12 +801,21 @@ async function changeHandled($: EngineInterface, event: HandledEvent) {
  */
 async function touchTickets($: EngineInterface, text: string, agentId: string | undefined) {
   try {
-    if (!/\.md\b/i.test(text)) return
-    const open = openTickets(await read($, roadmap))
-    if (open.length === 0) return
-    const tickets = handledTickets(text, open, await projectRoot($))
-    if (tickets.length > 0) await changeHandled($, { kind: 'touched', tickets, agentId })
+    await writeAll(await touchWrites($, text, agentId))
   } catch {}
+}
+
+/** 文字裡有還沒結案的票時，算那個 loop 經手要寫的；沒有、或出錯都是沒有 */
+async function touchWrites($: EngineInterface, text: string, agentId: string | undefined): Promise<Write[]> {
+  try {
+    if (!/\.md\b/i.test(text)) return []
+    const open = openTickets(await read($, roadmap))
+    if (open.length === 0) return []
+    const tickets = handledTickets(text, open, await projectRoot($))
+    return tickets.length > 0 ? await handledWrites($, { kind: 'touched', tickets, agentId }) : []
+  } catch {
+    return []
+  }
 }
 
 /** [設定] 的「更新紀錄」：用編輯器打開裝著的那一份；這一版沒有那個檔就說沒有。 */
@@ -698,16 +848,24 @@ async function submitPrompt($: EngineInterface, text: string, label: string) {
 
 // ── 分頁與摺疊 ───────────────────────────────────────────
 
-/** 切到某個分頁，並重讀那一頁的資料。 */
+/**
+ * 切到某個分頁，並重讀那一頁的資料。
+ * 換頁要寫的先算好一起寫，畫面立刻換；之後載入的資料有變才再寫一次。
+ */
 async function setTab($: EngineInterface, next: Tab) {
-  await closeHowto($)
-  // 換了分頁就不算在看路線圖了，之後任務有變化照常自動跟隨
-  await dispatch($, { kind: 'release' })
-  await update($, tab, () => next)
+  // 計數器：切分頁之後的 host 呼叫算給這次按鍵
+  const at = counters.enter('press.tab')
+  // 離開用法頁；換了分頁就不算在看路線圖了，之後任務有變化照常自動跟隨
+  const [shown, leaving, released] = await Promise.all([read($, tab), howtoCloseWrites($), taskWrites($, { kind: 'release' })])
+  const writes: Write[] = [...leaving, ...released.writes]
+  if (!isSame(shown, next)) writes.unshift(() => update($, tab, () => next))
+  await writeAll(writes)
+  syncTicker($, released.after)
   if (next !== 'settings') await $.store.set('lastTab', next)
   if (next === 'tasks') await roadmapChanged($, { kind: 'open' })
   if (next === 'basic') await loadPrompts($)
   if (next === 'skill') await loadSkills($)
+  counted($, 'press.tab', at)
 }
 
 /**
@@ -722,12 +880,17 @@ type Fold = 'openEfforts' | 'openSkillGroups' | 'closedPromptGroups'
  */
 async function toggleFold($: EngineInterface, fold: Fold, id: string) {
   const flip = (list: string[]) => toggled(list, id)
-  const next =
-    fold === 'openEfforts'
-      ? await update($, openEfforts, flip)
-      : fold === 'openSkillGroups'
-        ? await update($, openSkillGroups, flip)
-        : await update($, closedPromptGroups, flip)
+  let next: string[]
+  if (fold === 'openEfforts') {
+    const before = await read($, openEfforts)
+    next = changes(before, flip) ? await update($, openEfforts, flip) : before
+  } else if (fold === 'openSkillGroups') {
+    const before = await read($, openSkillGroups)
+    next = changes(before, flip) ? await update($, openSkillGroups, flip) : before
+  } else {
+    const before = await read($, closedPromptGroups)
+    next = changes(before, flip) ? await update($, closedPromptGroups, flip) : before
+  }
   await $.store.set(fold, next)
 }
 
@@ -745,14 +908,20 @@ async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown
     $.store.get('closedPromptGroups'),
     $.store.get('skillCategory'),
   ])
+  const openE = (list: string[]) => storedList(efforts) ?? list
+  const openS = (list: string[]) => storedList(skillGroups) ?? list
+  const closedP = (list: string[]) => storedList(promptGroups) ?? list
+  const picked = storedText(category)
+  const translated = storedTranslations(cachedTranslations)
+  // 用法的快取：形狀不對或舊版 prompt 整理的不收
+  const cached = storedHowtos(cachedHowtos)
   await Promise.all([
-    update($, openEfforts, list => storedList(efforts) ?? list),
-    update($, openSkillGroups, list => storedList(skillGroups) ?? list),
-    update($, closedPromptGroups, list => storedList(promptGroups) ?? list),
-    update($, skillCategory, () => storedText(category)),
-    update($, translations, () => storedTranslations(cachedTranslations)),
-    // 用法的快取：形狀不對或舊版 prompt 整理的不收
-    update($, howtos, () => storedHowtos(cachedHowtos)),
+    (async () => void (changes(await read($, openEfforts), openE) && (await update($, openEfforts, openE))))(),
+    (async () => void (changes(await read($, openSkillGroups), openS) && (await update($, openSkillGroups, openS))))(),
+    (async () => void (changes(await read($, closedPromptGroups), closedP) && (await update($, closedPromptGroups, closedP))))(),
+    (async () => void (!isSame(await read($, skillCategory), picked) && (await update($, skillCategory, () => picked))))(),
+    (async () => void (!isSame(await read($, translations), translated) && (await update($, translations, () => translated))))(),
+    (async () => void (!isSame(await read($, howtos), cached) && (await update($, howtos, () => cached))))(),
   ])
   return { lastTab }
 }
@@ -760,11 +929,13 @@ async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown
 /** 打開一個 skill 的用法頁：從它的第一頁看起，並記下列表原本停在第幾頁。 */
 async function openHowto($: EngineInterface, name: string) {
   skillListPage = (await read($, pages)).skill
-  await update($, pages, ps => ({ ...ps, skill: 0 }))
+  const first = (ps: Record<Tab, number>) => ({ ...ps, skill: 0 })
+  if (changes(await read($, pages), first)) await update($, pages, first)
   // 教學的狀態要看檔案才知道：先當作沒有，看完再補上按鈕
-  await update($, tutorial, () => ({ ...NO_TUTORIAL, name }))
-  await update($, tutorialMenu, () => false)
-  await update($, howtoPage, () => name)
+  const unknown = { ...NO_TUTORIAL, name }
+  if (!isSame(await read($, tutorial), unknown)) await update($, tutorial, () => unknown)
+  await showTutorialMenu($, false)
+  if (!isSame(await read($, howtoPage), name)) await update($, howtoPage, () => name)
   void checkTutorial($, name)
 }
 
@@ -792,12 +963,13 @@ async function checkTutorial($: EngineInterface, name: string) {
     status = await tutorialState(target, fs.read)
   } catch {}
   // 看到一半使用者已經換到別頁就不寫回去
-  if ((await read($, howtoPage)) === name) await update($, tutorial, () => ({ name, status }))
+  if ((await read($, howtoPage)) === name && !isSame(await read($, tutorial), { name, status }))
+    await update($, tutorial, () => ({ name, status }))
 }
 
 /** 產生一個 skill 的教學（問的是 sonnet），存檔後在編輯器打開。同一時間只產一份。 */
 async function makeSkillTutorial($: EngineInterface, name: string, label: string) {
-  await update($, tutorialMenu, () => false)
+  await showTutorialMenu($, false)
   const today = dateOf(await $.clock.now())
   let made: { path: string } | { error: string }
   try {
@@ -811,7 +983,10 @@ async function makeSkillTutorial($: EngineInterface, name: string, label: string
           today,
         )
       },
-      async running => void (await update($, makingTutorial, () => running ?? '')),
+      async running => {
+        const making = running ?? ''
+        if (!isSame(await read($, makingTutorial), making)) await update($, makingTutorial, () => making)
+      },
     )
     if ('busy' in ran) {
       $.ui.toast(ran.busy === name ? `「${label}」的教學還在產生` : `還有一份教學在產生（${ran.busy}），等它好了再按`)
@@ -825,7 +1000,8 @@ async function makeSkillTutorial($: EngineInterface, name: string, label: string
     $.ui.toast(`無法產生「${label}」的教學：${made.error}`)
     return
   }
-  await update($, tutorial, prev => (prev.name === name ? { name, status: 'fresh' as const } : prev))
+  const fresh = (prev: { name: string; status: TutorialState }) => (prev.name === name ? { name, status: 'fresh' as const } : prev)
+  if (changes(await read($, tutorial), fresh)) await update($, tutorial, fresh)
   await openInEditor($, made.path, undefined, `已產生「${label}」的教學，已在編輯器打開`)
 }
 
@@ -840,35 +1016,103 @@ async function pressTutorial($: EngineInterface, name: string, label: string) {
 
 /** 離開用法頁，回到列表原本那一頁；本來就在列表時什麼都不做。 */
 async function closeHowto($: EngineInterface) {
-  if ((await read($, howtoPage)) === '') return
-  await update($, howtoPage, () => '')
-  await update($, pages, ps => ({ ...ps, skill: skillListPage }))
+  await writeAll(await howtoCloseWrites($))
+}
+
+/** 離開用法頁要寫的：回到列表、翻回原本那一頁；本來就在列表時沒有 */
+async function howtoCloseWrites($: EngineInterface): Promise<Write[]> {
+  const [page, shown] = await Promise.all([read($, howtoPage), read($, pages)])
+  if (isSame(page, '')) return []
+  const back = (ps: Record<Tab, number>) => ({ ...ps, skill: skillListPage })
+  const writes: Write[] = [() => update($, howtoPage, () => '')]
+  if (changes(shown, back)) writes.push(() => update($, pages, back))
+  return writes
 }
 
 /** 按「重新載入路線圖」：重讀，翻回第一頁（路線圖在最上面），並在看路線圖的期間不自動跟隨 */
 async function lookAtRoadmap($: EngineInterface) {
-  await update($, pages, ps => ({ ...ps, tasks: 0 }))
+  const top = (ps: Record<Tab, number>) => ({ ...ps, tasks: 0 })
+  if (changes(await read($, pages), top)) await update($, pages, top)
   await dispatch($, { kind: 'hold' })
   await roadmapChanged($, { kind: 'open' })
 }
 
 /** 展開或收起 effort：展開時算在看票，不自動跟隨；一個都沒展開時恢復 */
 async function toggleEffort($: EngineInterface, name: string) {
-  await toggleFold($, 'openEfforts', name)
-  const open = await read($, openEfforts)
-  if (open.includes(name)) await dispatch($, { kind: 'hold' })
-  else if (open.length === 0) await dispatch($, { kind: 'release' })
+  // 展開的 effort 與跟隨狀態先算好一起寫，再存起來
+  const open = toggled(await read($, openEfforts), name)
+  const follow = open.includes(name)
+    ? await taskWrites($, { kind: 'hold' })
+    : open.length === 0
+      ? await taskWrites($, { kind: 'release' })
+      : undefined
+  await writeAll([() => update($, openEfforts, list => toggled(list, name)), ...(follow?.writes ?? [])])
+  if (follow !== undefined) syncTicker($, follow.after)
+  await $.store.set('openEfforts', open)
 }
 
 async function turnPage($: EngineInterface, current: Tab, to: number) {
-  await update($, pages, ps => ({ ...ps, [current]: Math.max(0, to) }))
+  const turned = (ps: Record<Tab, number>) => ({ ...ps, [current]: Math.max(0, to) })
+  if (changes(await read($, pages), turned)) await update($, pages, turned)
   if (current === 'tasks') await dispatch($, { kind: 'unfollow' })
 }
 
 // ── 任務 ─────────────────────────────────────────────────
 
 async function dispatch($: EngineInterface, event: TaskEvent) {
-  syncTicker($, await update($, board, b => applyTask(b, event)))
+  const planned = await taskWrites($, event)
+  await writeAll(planned.writes)
+  syncTicker($, planned.after)
+}
+
+/**
+ * 任務板的一件事要寫的：新的任務板，與跟著變的完成數與總數（停在別的分頁時，只有它變了外框才重畫）。
+ * 沒變就沒有；`after` 是寫了之後的任務板。
+ */
+async function taskWrites($: EngineInterface, event: TaskEvent): Promise<{ writes: Write[]; after: TaskBoard }> {
+  const apply = (b: TaskBoard) => applyTask(b, event)
+  const [before, shown] = await Promise.all([read($, board), read($, progress)])
+  if (!changes(before, apply)) return { writes: [], after: before }
+  const after = apply(before)
+  const counted = progressOf(after)
+  const writes: Write[] = [() => update($, board, apply)]
+  if (!isSame(shown, counted)) writes.push(() => update($, progress, () => counted))
+  return { writes, after }
+}
+
+/** 任務板寫入後順便算完成數與總數，數字變了才寫（停在別的分頁時，只有它變了外框才重畫） */
+async function syncProgress($: EngineInterface, now: TaskBoard) {
+  const counted = progressOf(now)
+  if (!isSame(await read($, progress), counted)) await update($, progress, () => counted)
+}
+
+// ── 面板上的小開關：每個都寫明自己的 atom，沒變就不寫（寫了就重畫） ──
+
+async function showTutorialMenu($: EngineInterface, on: boolean) {
+  if (!isSame(await read($, tutorialMenu), on)) await update($, tutorialMenu, () => on)
+}
+
+async function showHowtoMenu($: EngineInterface, on: boolean) {
+  if (!isSame(await read($, howtoMenu), on)) await update($, howtoMenu, () => on)
+}
+
+async function setSearch($: EngineInterface, text: string) {
+  if (!isSame(await read($, search), text)) await update($, search, () => text)
+}
+
+async function flipSwitchMode($: EngineInterface) {
+  const flip = (on: boolean) => !on
+  if (changes(await read($, switchMode), flip)) await update($, switchMode, flip)
+}
+
+async function flipDoneEfforts($: EngineInterface) {
+  const flip = (on: boolean) => !on
+  if (changes(await read($, showDoneEfforts), flip)) await update($, showDoneEfforts, flip)
+}
+
+async function foldRoadmap($: EngineInterface, id: string, isOpen: boolean) {
+  const fold = (folds: Record<string, boolean>) => ({ ...folds, [id]: !isOpen })
+  if (changes(await read($, roadmapFolds), fold)) await update($, roadmapFolds, fold)
 }
 
 /**
@@ -883,12 +1127,18 @@ function syncTicker($: EngineInterface, now: TaskBoard) {
     return
   }
   ticker ??= $.clock.every(1000, async () => {
-    const current = await read($, board)
-    if (!hasRunning(current)) return
-    const times = timeStamp(viewTasks(current, await $.clock.now()))
-    if (times === shownTimes) return
-    shownTimes = times
-    await update($, tick, n => n + 1)
+    const at = counters.enter('timer.tick')
+    try {
+      const current = await read($, board)
+      if (!hasRunning(current)) return
+      const times = timeStamp(viewTasks(current, await $.clock.now()))
+      if (times === shownTimes) return
+      shownTimes = times
+      const bump = (n: number) => n + 1
+      if (changes(await read($, tick), bump)) await update($, tick, bump)
+    } finally {
+      counted($, 'timer.tick', at)
+    }
   })
 }
 
@@ -915,8 +1165,19 @@ async function resetOptions($: EngineInterface) {
  * [任務] 分頁：上方是路線圖（每個 effort 一行，展開後看票），下方是待辦清單。
  * 每一行顯示哪些字、多寬時留哪幾欄，由 `viewRoadmap` 與 `taskCells` 決定；這裡只負責畫與掛上動作。
  */
-async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, view: TaskView): Promise<TabContent> {
+async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, now: number): Promise<TabContent> {
   const { Box, Text, Button } = ui
+  // 這個分頁要用的狀態一次讀完。會隨時間變的只有進行中的任務：有它們才讀計時的狀態，
+  // 其餘時候計時器跳了也不會重畫
+  const [taskBoard, efforts, showDone, open, folds, handledNow] = await Promise.all([
+    read($, board).then(async b => (hasRunning(b) ? (await read($, tick), b) : b)),
+    read($, roadmap),
+    read($, showDoneEfforts),
+    read($, openEfforts),
+    read($, roadmapFolds),
+    read($, handled),
+  ])
+  const view = viewTasks(taskBoard, now)
   const main = view.main
 
   // 數字是重點，後面的補充（還要多久）用暗色
@@ -1024,14 +1285,6 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
   })
 
   // ── 路線圖：放在待辦清單上方 ──
-  const [efforts, showDone, open, folds, handledNow, taskBoard] = await Promise.all([
-    read($, roadmap),
-    read($, showDoneEfforts),
-    read($, openEfforts),
-    read($, roadmapFolds),
-    read($, handled),
-    read($, board),
-  ])
   // 經手的票行尾標經手者的模型；路線圖整個算一塊，和 [任務] 清單分開決定完整或縮寫
   const road = viewRoadmap(efforts, {
     open: new Set(open),
@@ -1118,7 +1371,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
                       label={r.text}
                       plain
                       dimColor
-                      onPress={() => void update($, roadmapFolds, folds => ({ ...folds, [r.foldId]: !r.isOpen }))}
+                      onPress={() => void foldRoadmap($, r.foldId, r.isOpen)}
                     />
                   </Box>
                 ),
@@ -1179,7 +1432,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, vi
             plain
             dimColor
             hotkey="d"
-            onPress={() => void update($, showDoneEfforts, v => !v)}
+            onPress={() => void flipDoneEfforts($)}
           />
         )}
         {hasRoadmap && (
@@ -1351,25 +1604,44 @@ const PLUGIN_SWITCH_TAIL = tailWidth([{ tokens: true }, { button: '停用整個 
 /** 平常模式的組：「部分關」 */
 const GROUP_STATE_TAIL = tailWidth([{ plain: '部分關' }])
 
+/**
+ * [SKILL] 搜尋框先拔掉：打一個字重畫後輸入框就掉焦點，連主對話框的焦點也跟著亂。
+ * 引擎怎麼處理重畫後的焦點查清楚之前不開；環境變數 `COCKPIT_SKILL_SEARCH` 是 `1` 才畫出來
+ * （session 開始時判斷一次），搜尋的篩選邏輯與測試都留著。
+ */
+let skillSearch: boolean | undefined
+
+/** 第一次畫 [SKILL] 時判斷一次搜尋框開不開（模組重載時重來） */
+async function isSkillSearchOn($: EngineInterface) {
+  if (skillSearch !== undefined) return skillSearch
+  let flag: string | undefined
+  try {
+    flag = await $.env.get('COCKPIT_SKILL_SEARCH')
+  } catch {}
+  skillSearch = flag === '1'
+  return skillSearch
+}
+
 /** [SKILL] 分頁：已安裝的 skill，依 plugin 分組；頂端是搜尋框。點了把 `/<skill 名稱> ` 填進輸入框。 */
 async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): Promise<TabContent> {
   const { Box, Text, Button } = ui
   const Input = 'Input' in ui ? ui.Input : undefined
   const { settings } = config
 
-  // 這個分頁要用的狀態一次讀完
+  // 這個分頁要用的狀態一次讀完。目錄的原料連同 version 一起讀：讀出來每次都是新物件，
+  // 目錄照 version 判斷原料沒變，沒變就不重新分組
   const [
     query,
-    known,
-    listed,
-    fm,
-    over,
-    translated,
-    pageName,
+    knownAt,
+    listedAt,
+    fmAt,
+    overAt,
+    translatedAt,
+    [pageName, howtoState],
     openIds,
     isChoosing,
     isMakingNow,
-    from,
+    fromAt,
     chosenCategory,
     isSwitching,
     switches,
@@ -1377,31 +1649,46 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     installed,
   ] = await Promise.all([
     read($, search),
-    read($, howtos),
-    read($, commands),
-    read($, frontmatter),
-    read($, overrides),
-    read($, translations),
-    read($, howtoPage),
+    $.state.get({ plugin: 'cockpit', key: 'howtos' } as const),
+    $.state.get({ plugin: 'cockpit', key: 'commands' } as const),
+    $.state.get({ plugin: 'cockpit', key: 'frontmatter' } as const),
+    $.state.get({ plugin: 'cockpit', key: 'overrides' } as const),
+    $.state.get({ plugin: 'cockpit', key: 'translations' } as const),
+    // 用法頁開著才讀教學的狀態
+    read($, howtoPage).then(async name =>
+      name === '' ? ([name, undefined] as const) : ([name, await Promise.all([read($, tutorial), read($, makingTutorial), read($, tutorialMenu)])] as const),
+    ),
     read($, openSkillGroups),
     read($, howtoMenu),
     read($, makingHowtos),
-    read($, skillSources),
+    $.state.get({ plugin: 'cockpit', key: 'skillSources' } as const),
     read($, skillCategory),
     read($, switchMode),
     read($, skillSwitches),
     read($, pluginSwitches),
     read($, installedPluginKeys),
   ])
+  // 還沒寫過的狀態讀出來是 undefined（version 0），照 atom 的初始值
+  const known = knownAt.value ?? howtos.initial
+  const listed = listedAt.value ?? commands.initial
+  const fm = fmAt.value ?? frontmatter.initial
+  const over = overAt.value ?? overrides.initial
+  const translated = translatedAt.value ?? translations.initial
+  const from = fromAt.value ?? skillSources.initial
+  const versions = { commands: listedAt.version, frontmatter: fmAt.version, overrides: overAt.version, sources: fromAt.version }
   // 每個 skill、組、分類的開關狀態與按下去做什麼（停用了的 plugin 照樣有一組，才按得到「啟用」）
   const board = switchboard({
     commands: listed,
     frontmatter: fm,
     overrides: over,
-    groups: catalogOf({ commands: listed, frontmatter: fm, overrides: over, sources: from }).groups({
+    groups: catalogOf({ commands: listed, frontmatter: fm, overrides: over, sources: from }, versions).groups({
       ...(settings.translate ? { translations: translated } : {}),
       // 「整理用法」關掉時當作都沒有用法：沒有「?」、進不了用法頁、搜尋也不比對；存著的用法不動
       ...(settings.howto ? { howtos: known } : {}),
+      versions: {
+        ...(settings.translate ? { translations: translatedAt.version } : {}),
+        ...(settings.howto ? { howtos: knownAt.version } : {}),
+      },
     }),
     switches,
     enabledPlugins,
@@ -1411,13 +1698,9 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
 
   // ── 用法頁：搜尋框與列表換成一個 skill 的說明與用法 ──
   const shown = pageName === '' ? undefined : all.flatMap(g => g.items).find(s => s.name === pageName)
-  if (shown?.howto !== undefined) {
+  if (shown?.howto !== undefined && howtoState !== undefined) {
     // 教學：找不到 SKILL.md 的沒有按鈕；已經有教學時，說明上面多一行狀態與「重新產生」
-    const [known, making, isConfirming] = await Promise.all([
-      read($, tutorial),
-      read($, makingTutorial),
-      read($, tutorialMenu),
-    ])
+    const [known, making, isConfirming] = howtoState
     const tutorialNow: TutorialState = known.name === shown.name ? known.status : 'unavailable'
     const isMakingTutorial = making === shown.name
     const hasTutorialButton = tutorialNow !== 'unavailable'
@@ -1497,10 +1780,10 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
                   plain
                   onPress={() => void makeSkillTutorial($, shown.name, shown.label)}
                 />
-                <Button key="tutorial-menu-close" label="×" onPress={() => void update($, tutorialMenu, () => false)} />
+                <Button key="tutorial-menu-close" label="×" onPress={() => void showTutorialMenu($, false)} />
               </Box>
             ) : (
-              <Button key="tutorial-remake" label="重新產生" plain onPress={() => void update($, tutorialMenu, () => true)} />
+              <Button key="tutorial-remake" label="重新產生" plain onPress={() => void showTutorialMenu($, true)} />
             )}
           </Box>
         ),
@@ -1518,7 +1801,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
 
   /** 「更新用法」選了怎麼跑：收起選單再開始 */
   const runHowtos = async (run: HowtoRun) => {
-    await update($, howtoMenu, () => false)
+    await showHowtoMenu($, false)
     await makeSkillHowtos($, run)
   }
 
@@ -1529,7 +1812,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       label={isSwitching ? '完成' : '開關'}
       plain
       hotkey="o"
-      onPress={() => void update($, switchMode, on => !on)}
+      onPress={() => void flipSwitchMode($)}
     />
   )
 
@@ -1552,14 +1835,14 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             placeholder="名稱或說明"
             value={query}
             submitLabel="篩選"
-            onInput={(v: string) => void update($, search, () => v)}
-            onSubmit={(v: string) => void update($, search, () => v)}
+            onInput={(v: string) => void setSearch($, v)}
+            onSubmit={(v: string) => void setSearch($, v)}
           />
         ) : (
           <Text dimColor>{query || '（這個介面沒有輸入框）'}</Text>
         )}
       </Box>
-      {isSearching && <Button key="clear-search" label="×" onPress={() => void update($, search, () => '')} />}
+      {isSearching && <Button key="clear-search" label="×" onPress={() => void setSearch($, '')} />}
     </Box>
   )
 
@@ -1583,7 +1866,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
               <Box key="howto-menu" flexDirection="row" gap={2} flexShrink={0}>
                 <Button key="howto-quick" label="快速" plain hotkey="q" onPress={() => void runHowtos('quick')} />
                 <Button key="howto-full" label="重整" plain hotkey="r" onPress={() => void runHowtos('full')} />
-                <Button key="howto-menu-close" label="×" onPress={() => void update($, howtoMenu, () => false)} />
+                <Button key="howto-menu-close" label="×" onPress={() => void showHowtoMenu($, false)} />
               </Box>
             ),
           }
@@ -1595,7 +1878,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
                 label="更新用法"
                 plain
                 hotkey="u"
-                onPress={() => void update($, howtoMenu, () => true)}
+                onPress={() => void showHowtoMenu($, true)}
               />
             ),
           }
@@ -1699,6 +1982,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
 
   /** 點分類分頁籤：換成那個分類，存起來下次開還停在這裡 */
   const pickCategory = async (name: string) => {
+    if (isSame(await read($, skillCategory), name)) return
     await update($, skillCategory, () => name)
     await $.store.set('skillCategory', name)
   }
@@ -1867,7 +2151,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   return {
     ...(top === undefined ? {} : { top, topRows: view.topRows }),
     // 搜尋框在框內最後一行（說明區下面），像在底下打字篩選
-    bottom: searchRow,
+    ...((await isSkillSearchOn($)) ? { bottom: searchRow } : {}),
     actions,
     actionsWidth,
     rows,
@@ -1886,6 +2170,8 @@ const INDICATOR_COLOR = 'warning'
 async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabContent> {
   const { Box, Text, Button } = ui
   const Select = 'Select' in ui ? ui.Select : undefined
+  // 這個分頁要用的狀態一次讀完：下框線右端的版本與留著的標示
+  const [version, indicator] = await Promise.all([readVersion($), shownIndicator($)])
   const changed = new Set(changedFields(config.raw))
 
   const rows: Row<JSX.Element>[] = []
@@ -1946,8 +2232,6 @@ async function settingsTab($: EngineInterface, { ui }: TabContext): Promise<TabC
   // 目前裝的版本疊在下框線右端，回報問題或確認有沒有更新到時看這裡；後面的按鈕去看發布的是哪一版。
   // 發布的版本和裝的不同時，版本號後面留著高亮的標示，換上之後才消失。已經下載的話按鈕換成「立即換上」：
   // 不必詢問，重新載入 mod 就換上（不必重開 Claude Code），由新的那一份在開場講現在是哪一版
-  const version = await readVersion($)
-  const indicator = await shownIndicator($)
   if (version === '') return { actions, actionsWidth, rows }
   const versionText = `cockpit ${version}`
   const checkLabel = indicator?.kind === 'downloaded' ? SWITCH_NOW : '檢查版本'
@@ -1997,24 +2281,33 @@ async function loadSession($: EngineInterface) {
   lastEffort = undefined
   shownTimes = ''
   missedTranslations.clear()
+  // 計數器開著時，紀錄跟著這個 session 的 id（/clear 之後換一份）
+  await countSession($)
   // 上一個 session 留下來的教學狀態不算數
   await Promise.all([
-    update($, makingTutorial, () => ''),
-    update($, makingHowtos, () => false),
-    update($, tutorialMenu, () => false),
+    (async () => void (!isSame(await read($, makingTutorial), '') && (await update($, makingTutorial, () => ''))))(),
+    (async () => void (!isSame(await read($, makingHowtos), false) && (await update($, makingHowtos, () => false))))(),
+    showTutorialMenu($, false),
     // 經手只算這個 session 的
-    update($, handled, () => ({})),
+    (async () => void (!isSame(await read($, handled), {}) && (await update($, handled, () => ({})))))(),
   ])
   const { lastTab } = await restoreRemembered($)
-  await update($, tab, () => startTab(config.settings.defaultTab, lastTab))
+  const first = startTab(config.settings.defaultTab, lastTab)
+  if (!isSame(await read($, tab), first)) await update($, tab, () => first)
 
-  void refresh($)
-  void loadUsage($)
-  void loadPrompts($)
-  void loadSkills($)
-  void roadmapChanged($, { kind: 'open' })
-  // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器）
-  syncTicker($, await read($, board))
+  // 背景預載：不等它們；計數器開著時記下全部完成的時間與期間讀了幾次檔
+  counters.preloadBegan()
+  const preload = [refresh($), loadUsage($), loadPrompts($), loadSkills($), roadmapChanged($, { kind: 'open' })]
+  if (counters.isOn)
+    void Promise.allSettled(preload).then(() => {
+      counters.preloaded()
+      void saveCounters($)
+    })
+  // 有進行中的任務時，每秒看一次耗時要不要重畫（任務清單跨重載留著，所以開場先看一次要不要開計時器，
+  // 完成數與總數也照留著的清單對一次）
+  const taskBoard = await read($, board)
+  syncTicker($, taskBoard)
+  await syncProgress($, taskBoard)
 }
 
 // ══ 登記 hook 與外框 ══════════════════════════════════════════════════════
@@ -2029,6 +2322,8 @@ export const register: Register = (on, options) => {
   config.raw = rawValues(options)
 
   on('session.start', async ($, e, next) => {
+    // 計數器在這裡決定開不開，整個 session 不再看
+    await startCounters($)
     await $.command.register({
       name: 'cockpit',
       description: '開啟 cockpit 面板：模型、用量、任務、常用 prompt 與 skill',
@@ -2038,13 +2333,21 @@ export const register: Register = (on, options) => {
     await Promise.all([loadSession($), updater.open()])
     if (settings.autoOpen) void $.ui.open({ id: PANE, title: TITLE })
     // 發布的版本排在最後、隔一下才去看：上面的事都排出去、面板開出來之後才開始，檢查不擋住面板的顯示
-    $.clock.after(STARTUP_CHECK_DELAY, () => void updater.startupCheck())
+    $.clock.after(STARTUP_CHECK_DELAY, () => {
+      const at = counters.enter('timer.startup-check')
+      void updater.startupCheck()
+      counted($, 'timer.startup-check', at)
+    })
 
     // 有額度資料時，每 60 秒重畫一次 5H 倒數
     $.clock.every(60_000, async () => {
-      if ((await read($, usage)).rateLimits.length > 0) await update($, minute, n => n + 1)
+      const at = counters.enter('timer.minute')
+      const bump = (n: number) => n + 1
+      if ((await read($, usage)).rateLimits.length > 0 && changes(await read($, minute), bump)) await update($, minute, bump)
+      counted($, 'timer.minute', at)
     })
 
+    counters.startWaited()
     return next(e)
   })
 
@@ -2052,13 +2355,20 @@ export const register: Register = (on, options) => {
   // 等舊的 session 收完尾、換到新的之後，自己把畫面上的資料重讀一遍
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
-    if (e.reason === 'clear') $.clock.after(CLEAR_RELOAD_DELAY, () => void loadSession($))
+    if (e.reason === 'clear')
+      $.clock.after(CLEAR_RELOAD_DELAY, () => {
+        const at = counters.enter('timer.clear-reload')
+        void loadSession($)
+        counted($, 'timer.clear-reload', at)
+      })
     return ended
   })
 
   on('command.run', { command: 'cockpit' }, async $ => {
+    const at = counters.enter('command.cockpit')
     await refresh($)
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
+    counted($, 'command.cockpit', at)
 
     return { text: 'Cockpit 面板已開啟。' }
   })
@@ -2066,45 +2376,56 @@ export const register: Register = (on, options) => {
   // 使用者自己打 /model 或 /effort 時，跑完後同步面板
   on('command.run', { command: 'model' }, async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('command.model')
     await refresh($)
+    counted($, 'command.model', at)
     return ran
   }).catch(($, e, next) => next(e))
   on('command.run', { command: 'effort' }, async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('command.effort')
     const level = e.args.trim()
-    if ((EFFORTS as readonly string[]).includes(level)) await update($, chosenEffort, () => level)
+    if ((EFFORTS as readonly string[]).includes(level) && !isSame(await read($, chosenEffort), level))
+      await update($, chosenEffort, () => level)
     await refresh($)
+    counted($, 'command.effort', at)
     return ran
   }).catch(($, e, next) => next(e))
 
   // 主執行緒每次送出請求時，記下實際使用的深度（已含模型的自動降級）
   on('turn.step', async function* ($, e, next) {
-    if (e.agentId === undefined && e.effort !== undefined) {
-      const level = String(e.effort)
-      if (level !== lastEffort) {
-        lastEffort = level
-        void update($, effort, () => level)
-      }
-    }
+    // 這個 hook 的工作在 next 之前：量的是交給 next 之前的那一段（記下要做的事，排到背景）
+    const at = counters.enter('turn.step')
+    const level = e.agentId === undefined && e.effort !== undefined ? String(e.effort) : undefined
     // 模型標示：每個 loop 記住最近一次的模型與深度，主對話的是基準；沒變就不寫，免得每一步都重畫
-    try {
-      const step: TaskEvent = { kind: 'step', agentId: e.agentId, model: e.model, effort: e.effort === undefined ? undefined : String(e.effort) }
-      const current = await read($, board)
-      if (applyTask(current, step) !== current) await dispatch($, step)
-    } catch {}
+    const step: TaskEvent = { kind: 'step', agentId: e.agentId, model: e.model, effort: e.effort === undefined ? undefined : String(e.effort) }
+    later(async () => {
+      const writes: Write[] = []
+      if (level !== undefined && level !== lastEffort) {
+        lastEffort = level
+        if (!isSame(await read($, effort), level)) writes.push(() => update($, effort, () => level))
+      }
+      const planned = await taskWrites($, step)
+      await writeAll([...writes, ...planned.writes])
+      if (planned.writes.length > 0) syncTicker($, planned.after)
+    })
+    counted($, 'turn.step', at)
     return yield* next(e)
   })
 
   on('session.measure', async ($, e, next) => {
-    try {
-      await applyUsage($, usageOf(e), false)
-    } catch {}
+    // 這個 hook 的工作在 next 之前：量的是交給 next 之前的那一段
+    const at = counters.enter('session.measure')
+    later(() => applyUsage($, usageOf(e), false))
+    counted($, 'session.measure', at)
     return next(e)
   })
 
   // 請模型在任務名稱後附上 (~Nm) 預估，面板用它預測剩餘時間
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
+    const at = counters.enter('prompt.compose')
+    counted($, 'prompt.compose', at)
     return {
       sections: [...composed.sections, { id: 'cockpit:estimates', text: ESTIMATE_PROMPT, scope: 'session' }],
     }
@@ -2114,39 +2435,49 @@ export const register: Register = (on, options) => {
   // 任務來源一：TodoWrite 每次送來整份清單；subagent 的清單掛在派出它的任務底下
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('tool.TodoWrite')
     if (succeeded(ran)) {
-      try {
-        const owner = e.agentId
+      const owner = e.agentId
+      later(async () => {
         // 時間與 subagent 的資料一起問
-        const [now, agents] = await Promise.all([$.clock.now(), owner === undefined ? undefined : $.agent.list()])
+        const [now, agents] = await Promise.all([$.clock.now(), owner === undefined ? undefined : listAgents($)])
         const info = agents?.find(a => a.id === owner)
         const agent = owner === undefined ? undefined : { label: info?.description ?? '', parentId: info?.parentId }
         await dispatch($, { kind: 'todos', todos: e.todos, now, agentId: owner, agent })
-      } catch {}
+      })
     }
+    counted($, 'tool.TodoWrite', at)
     return ran
   }).catch(($, e, next) => next(e))
 
   // subagent 列：派出就建一行（醒來再派出只更新）；teammate 與 workflow 的 agent 不列
   on('agent.spawn', async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('agent.spawn')
     if (ran.deny === undefined && ran.agentId !== undefined && e.isTeammate !== true && e.workflow === undefined) {
-      try {
+      const agentId = ran.agentId
+      const model = ran.model
+      later(async () => {
         const now = await $.clock.now()
-        await dispatch($, {
-          kind: 'spawned',
-          agentId: ran.agentId,
-          label: e.description,
-          type: e.subagentType,
-          prompt: e.prompt,
-          parentAgentId: e.parentAgentId,
-          model: ran.model,
-          now,
-        })
-      } catch {}
-      // 派工的 prompt 裡有票的路徑：算這個 subagent 經手
-      await touchTickets($, e.prompt, ran.agentId)
+        // 新的一列，與派工的 prompt 裡有票的路徑時這個 subagent 的經手：先算好，一起寫
+        const [planned, touched] = await Promise.all([
+          taskWrites($, {
+            kind: 'spawned',
+            agentId,
+            label: e.description,
+            type: e.subagentType,
+            prompt: e.prompt,
+            parentAgentId: e.parentAgentId,
+            model,
+            now,
+          }),
+          touchWrites($, e.prompt, agentId),
+        ])
+        await writeAll([...planned.writes, ...touched])
+        syncTicker($, planned.after)
+      })
     }
+    counted($, 'agent.spawn', at)
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -2154,48 +2485,54 @@ export const register: Register = (on, options) => {
   // subagent 回報的通知不算：它的回報常寫著票的路徑，但做的不是主對話
   on('prompt.submit', async ($, e, next) => {
     const ran = await next(e)
-    if (!('drop' in ran) && e.origin.kind !== 'task-notification') await touchTickets($, e.text, undefined)
+    const at = counters.enter('prompt.submit')
+    if (!('drop' in ran) && e.origin.kind !== 'task-notification') later(() => touchTickets($, e.text, undefined))
+    counted($, 'prompt.submit', at)
     return ran
   }).catch(($, e, next) => next(e))
 
   // subagent 的一輪結束：由當下 `$.agent.list()` 的狀態判斷真的結束了沒（等子 agent 回報時是 waiting）
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('turn.complete')
     const owner = e.agentId
-    if (owner !== undefined) {
-      try {
-        if ((await read($, board)).agents.some(g => g.id === owner)) {
-          const [now, agents] = await Promise.all([$.clock.now(), $.agent.list()])
-          const status = agents.find(a => a.id === owner)?.status
-          await dispatch($, { kind: 'ended', agentId: owner, reason: e.reason, status, now })
-          // 真的結束了（不是在等它派的子 agent）：它經手的票拿掉
-          const row = (await read($, board)).agents.find(g => g.id === owner)
-          if (row !== undefined && isEnded(row)) await changeHandled($, { kind: 'ended', agentId: owner })
-        }
-      } catch {}
-    }
+    if (owner !== undefined)
+      later(async () => {
+        if (!(await read($, board)).agents.some(g => g.id === owner)) return
+        const [now, agents] = await Promise.all([$.clock.now(), listAgents($)])
+        const status = agents.find(a => a.id === owner)?.status
+        const planned = await taskWrites($, { kind: 'ended', agentId: owner, reason: e.reason, status, now })
+        // 真的結束了（不是在等它派的子 agent）：它經手的票拿掉，和任務板一起寫
+        const row = planned.after.agents.find(g => g.id === owner)
+        const released = row !== undefined && isEnded(row) ? await handledWrites($, { kind: 'ended', agentId: owner }) : []
+        await writeAll([...planned.writes, ...released])
+        syncTicker($, planned.after)
+      })
+    counted($, 'turn.complete', at)
     return ran
   }).catch(($, e, next) => next(e))
 
   // 任務來源二：TaskCreate / TaskUpdate（整個 session 共用一份，只收主對話的）
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
+    const at = counters.enter('tool.TaskCreate')
     // 這裡要用到 `ran.result`，條件寫開來型別才縮得進去
     if (e.agentId === undefined && ran.deny === undefined && ran.isError !== true) {
-      try {
-        await dispatch($, { kind: 'created', id: String(ran.result.task.id), subject: e.subject })
-      } catch {}
+      const id = String(ran.result.task.id)
+      later(() => dispatch($, { kind: 'created', id, subject: e.subject }))
     }
+    counted($, 'tool.TaskCreate', at)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (e.agentId === undefined && succeeded(ran)) {
-      try {
+    const at = counters.enter('tool.TaskUpdate')
+    if (e.agentId === undefined && succeeded(ran))
+      later(async () => {
         const now = await $.clock.now()
         await dispatch($, { kind: 'updated', id: String(e.taskId), status: e.status, subject: e.subject, now })
-      } catch {}
-    }
+      })
+    counted($, 'tool.TaskUpdate', at)
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -2203,58 +2540,65 @@ export const register: Register = (on, options) => {
   // 經手：改了票檔、或指令裡有票的路徑，算發出它的 loop 經手（只讀不算，所以 Read 不接）
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const ran = await next(e)
-    if (succeeded(ran)) await touchTickets($, e.file_path, e.agentId)
+    const at = counters.enter('tool.Write')
+    if (succeeded(ran)) later(() => touchTickets($, e.file_path, e.agentId))
     void roadmapChanged($, wroteFile(e.file_path, ran))
+    counted($, 'tool.Write', at)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
-    if (succeeded(ran)) await touchTickets($, e.file_path, e.agentId)
+    const at = counters.enter('tool.Edit')
+    if (succeeded(ran)) later(() => touchTickets($, e.file_path, e.agentId))
     void roadmapChanged($, wroteFile(e.file_path, ran))
+    counted($, 'tool.Edit', at)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined) await touchTickets($, e.command, e.agentId)
+    const at = counters.enter('tool.Bash')
+    if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
     void roadmapChanged($, ranShell(ran))
+    counted($, 'tool.Bash', at)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined) await touchTickets($, e.command, e.agentId)
+    const at = counters.enter('tool.PowerShell')
+    if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
     void roadmapChanged($, ranShell(ran))
+    counted($, 'tool.PowerShell', at)
     return ran
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const drawnAt = counters.stamp()
+    // 事件排在背景的工作先做完再畫：畫出來的是那件事之後的樣子
+    await backlog
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const Select = 'Select' in ui ? ui.Select : undefined
     const { settings } = config
     const accent = settings.accent
-    // 外框要用的狀態一次讀完
-    const [now, taskBoard, currentTab, currentModel, actualEffort, chosen, busy, usageNow, allPages] = await Promise.all([
+    // 外框要用的狀態一次讀完。外框不讀任務板，只讀它的完成數與總數（任務板只有 [任務] 讀）；
+    // 額度的倒數會隨時間變：有額度才讀計時的狀態，其餘時候計時器跳了也不會重畫這個面板
+    const [now, counted, currentTab, currentModel, actualEffort, chosen, busy, usageNow, allPages, indicator] = await Promise.all([
       $.clock.now(),
-      read($, board),
+      read($, progress),
       read($, tab),
       read($, model),
       read($, effort),
       read($, chosenEffort),
       read($, switching),
-      read($, usage),
+      read($, usage).then(async u => (u.rateLimits.length > 0 ? (await read($, minute), u) : u)),
       read($, pages),
+      shownIndicator($),
     ])
-    // 會隨時間變的只有 [任務] 上進行中的任務與額度的倒數：有它們才讀計時的狀態，
-    // 其餘時候計時器跳了也不會重畫這個面板
-    if (currentTab === 'tasks' && hasRunning(taskBoard)) await read($, tick)
-    if (usageNow.rateLimits.length > 0) await read($, minute)
-    const indicator = await shownIndicator($)
 
     // ── 分頁列：[任務] 的標籤帶著進度 ──
-    const view = viewTasks(taskBoard, now)
     const tabLabel = (t: (typeof TABS)[number]) =>
-      t.id === 'tasks' && view.main.total > 0 && view.main.doneCount < view.main.total
-        ? `${t.label} ${view.main.doneCount}/${view.main.total}`
+      t.id === 'tasks' && counted.total > 0 && counted.doneCount < counted.total
+        ? `${t.label} ${counted.doneCount}/${counted.total}`
         : t.label
     // 有留著的標示時，「設定」變色並帶記號：停在別的分頁也看得出 [設定] 裡有事
     const isFlagged = (id: Tab) => id === 'settings' && indicator !== undefined
@@ -2363,7 +2707,7 @@ export const register: Register = (on, options) => {
     const ctx: TabContext = { ui, cols, accent }
     const content =
       currentTab === 'tasks'
-        ? await tasksTab($, ctx, view)
+        ? await tasksTab($, ctx, now)
         : currentTab === 'basic'
           ? await basicTab($, ctx)
           : currentTab === 'skill'
@@ -2590,12 +2934,14 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    return (
+    const tree = (
       <Box flexDirection="column">
         {framed('card-a', <Text bold> 狀態 </Text>, stateBody)}
         {!isTabsOnBorder && tabBar}
         {framed('card-b', isTabsOnBorder ? tabBar : <Text />, tabBody, pager || statusFoot, actionsFoot)}
       </Box>
     )
+    drawn($, currentTab, drawnAt)
+    return tree
   })
 }

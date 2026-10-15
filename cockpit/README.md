@@ -298,6 +298,7 @@ claude plugin validate .     # 檢查設定檔與 hooks module
 claude plugin test .         # 跑 tests/ 底下的測試
 npx -p typescript tsc -p .   # 型別檢查
 node --test scripts/publish.test.mjs   # 跑發布指令的測試（和上面的測試分開跑）
+node scripts/bench.mjs --runs=5        # 效能基準，和 .bench/baseline.json 比；加 --save 存成新基準
 ```
 
 ### 發布
@@ -365,3 +366,4 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `types/index.d.ts` | `$.state` 的型別合約 |
 | `tests/` | 單元測試與面板測試；`fixtures/commandList.ts` 是實測的 `$.command.list()` 輸出 |
 | `scripts/publish.mjs` | 發布指令（見上方「發布」）；`publish.test.mjs` 是它的測試，用 Node 內建的測試工具跑；`remove-dir.mjs` 是兩者共用的刪資料夾 |
+| `scripts/bench.mjs` | 效能基準：直接載入 `hooks/` 裡不碰引擎的模組，量路線圖、SKILL 分組與搜尋、任務的耗時；基準存在 `.bench/`（不進 git，數字跟機器有關） |
