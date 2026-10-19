@@ -7,6 +7,7 @@ import type {
   EffortLevel,
   FrontmatterEntry,
   PromptGroup,
+  SkillGroup,
   SkillItem,
   SkillOverrides,
   Tab,
@@ -53,6 +54,8 @@ import {
 } from './skills'
 import type { SkillCatalog, SkillSources } from './skills'
 import { findSkillFile } from './source'
+import { NO_VERSIONS, groupVersion, groupVersionText, lockVersions, mergeLockVersions, pluginVersions, versionOf } from './versions'
+import type { SkillVersions } from './versions'
 import {
   IGNORED_NOTICE,
   INSTALLED_PLUGINS,
@@ -132,6 +135,8 @@ const commands = atom({ plugin: 'cockpit', key: 'commands' } as const, [] as Com
 const frontmatter = atom({ plugin: 'cockpit', key: 'frontmatter' } as const, [] as FrontmatterEntry[])
 const overrides = atom({ plugin: 'cockpit', key: 'overrides' } as const, EMPTY_OVERRIDES as SkillOverrides)
 const skillSources = atom({ plugin: 'cockpit', key: 'skillSources' } as const, NO_SOURCES as SkillSources)
+/** plugin 與 npx skills 裝的 skill 的版號；停在 skill 或組名上才顯示 */
+const skillVersions = atom({ plugin: 'cockpit', key: 'skillVersions' } as const, NO_VERSIONS as SkillVersions)
 const openSkillGroups = atom({ plugin: 'cockpit', key: 'openSkillGroups' } as const, [] as string[])
 const switchMode = atom({ plugin: 'cockpit', key: 'switchMode' } as const, false)
 const skillSwitches = atom({ plugin: 'cockpit', key: 'skillSwitches' } as const, {} as Record<string, unknown>)
@@ -235,6 +240,7 @@ type Plan = {
   installedPluginKeys?: Of<typeof installedPluginKeys>
   overrides?: Of<typeof overrides>
   skillSources?: Of<typeof skillSources>
+  skillVersions?: Of<typeof skillVersions>
   skillSwitches?: Of<typeof skillSwitches>
   pluginSwitches?: Of<typeof pluginSwitches>
   skillCategory?: Of<typeof skillCategory>
@@ -274,6 +280,7 @@ async function planWrites($: EngineInterface, plan: Plan): Promise<Write[]> {
     keep(plan.installedPluginKeys, () => read($, installedPluginKeys), v => () => update($, installedPluginKeys, () => v)),
     keep(plan.overrides, () => read($, overrides), v => () => update($, overrides, () => v)),
     keep(plan.skillSources, () => read($, skillSources), v => () => update($, skillSources, () => v)),
+    keep(plan.skillVersions, () => read($, skillVersions), v => () => update($, skillVersions, () => v)),
     keep(plan.skillSwitches, () => read($, skillSwitches), v => () => update($, skillSwitches, () => v)),
     keep(plan.pluginSwitches, () => read($, pluginSwitches), v => () => update($, pluginSwitches, () => v)),
     keep(plan.skillCategory, () => read($, skillCategory), v => () => update($, skillCategory, () => v)),
@@ -542,7 +549,8 @@ async function loadSkills($: EngineInterface) {
     Object.assign(plan, switchPlan(await (await projectFiles($)).read(LOCAL_SETTINGS)))
     const home = await homeDir($)
     // plugin 組的開關要用完整的鍵；停用了的 plugin 也靠這份清單畫出它的組
-    const installed = installedPlugins(await files($).read(`${home}/${INSTALLED_PLUGINS}`))
+    const installedText = await files($).read(`${home}/${INSTALLED_PLUGINS}`)
+    const installed = installedPlugins(installedText)
     plan.installedPluginKeys = installed
     const text = await files($).read(`${home}/.claude/cockpit/skills.json`)
     const over = text === undefined ? EMPTY_OVERRIDES : parseOverrides(text)
@@ -550,11 +558,16 @@ async function loadSkills($: EngineInterface) {
     // 用 npx skills 裝的 skill 從哪裡來；沒用過 npx skills 就沒有這個檔
     const lock = await files($).read(`${home}/.agents/.skill-lock.json`)
     // 裝在專案裡的（不加 -g）記在專案根目錄的 skills-lock.json；根目錄和找專案 skill 原文時用同一份清單
-    const projectLocks = await Promise.all(
-      (await projectDirs($)).map(async dir => parseSkillLock(await files($).read(under(dir, 'skills-lock.json')))),
+    const projectLockTexts = await Promise.all(
+      (await projectDirs($)).map(dir => files($).read(under(dir, 'skills-lock.json'))),
     )
-    const sources = mergeSkillSources(parseSkillLock(lock), projectLocks)
+    const sources = mergeSkillSources(parseSkillLock(lock), projectLockTexts.map(parseSkillLock))
     plan.skillSources = sources
+    // 版號：plugin 看安裝紀錄，npx skills 裝的看 lock 檔
+    plan.skillVersions = {
+      plugins: pluginVersions(installedText),
+      skills: mergeLockVersions(lockVersions(lock), projectLockTexts.map(lockVersions)),
+    }
   } finally {
     // 中途讀不到時，之前已經讀好的照樣寫上去
     await commit($, plan)
@@ -1591,6 +1604,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     switches,
     enabledPlugins,
     installed,
+    versionsKnown,
   ] = await Promise.all([
     $.state.get({ plugin: 'cockpit', key: 'howtos' } as const),
     $.state.get({ plugin: 'cockpit', key: 'commands' } as const),
@@ -1610,6 +1624,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     read($, skillSwitches),
     read($, pluginSwitches),
     read($, installedPluginKeys),
+    read($, skillVersions),
   ])
   // 還沒寫過的狀態讀出來是 undefined（version 0），照 atom 的初始值
   const known = knownAt.value ?? howtos.initial
@@ -1963,12 +1978,28 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
 
   // 說明欄標題的提示：有用法的寫有幾項；這一輪還在整理、而且還沒輪到的寫整理中
   const isMaking = settings.howto && isMakingNow
-  const howtoHint = (s: SkillItem) =>
-    s.howto
+  // 說明欄標題後面的提示：版號與日期在前（查得到才有），接著是用法。
+  // 日期一起寫：官方 marketplace 的是整個 repo 的 commit、npx skills 的是資料夾雜湊，看日期才知道有沒有更新
+  const howtoHint = (s: SkillItem) => {
+    const howto = s.howto
       ? `點 ? 看用法（${howtoCount(s.howto)} 項）`
       : isMaking && !Object.hasOwn(known, s.name)
         ? '用法整理中…'
         : undefined
+    const found = versionOf(versionsKnown, s.name)
+    const version = found === undefined ? undefined : groupVersionText(found)
+    return version === undefined ? howto : howto === undefined ? version : `${version} · ${howto}`
+  }
+
+  /** 組名列浮出的版號字；組裡的 skill 版號不一致（例如混了來源的自訂組）就沒有 */
+  const groupVersionOf = (g: SkillGroup) => {
+    const v = groupVersion(
+      versionsKnown,
+      g.id,
+      g.items.map(s => s.name),
+    )
+    return v === undefined ? undefined : groupVersionText(v)
+  }
 
   const rows: Row<JSX.Element>[] = []
   for (const g of view.groups) {
@@ -2023,6 +2054,18 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
             </Button>
           </Box>
           {tail === null ? null : <Box key={`group-tail-${g.id}`} flexShrink={0}>{tail}</Box>}
+          {/* 版號：停在組名列時才浮在行尾（「已關」、開關的左邊）；疊在上面，不擠動組名。
+              不給 key：給了它自己就成了 hover 範圍，而它平常藏著、滑鼠停不到 */}
+          {groupVersionOf(g) === undefined ? null : (
+            <Box
+              position="absolute"
+              right={tail === null ? 0 : groupTailWidth + 1}
+              display="none"
+              hover={{ display: 'flex' }}
+            >
+              <Text color={accent}>{` ${groupVersionOf(g)}`}</Text>
+            </Box>
+          )}
         </Box>
       ),
     })

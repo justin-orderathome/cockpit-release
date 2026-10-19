@@ -229,6 +229,11 @@ declare module 'claude-code' {
       overrides: SkillOverrides
       /** 用 `npx skills add -g` 裝的 skill 的來源：skill 名稱 → `owner/repo`（取自 `~/.agents/.skill-lock.json`） */
       skillSources: Record<string, string>
+      /** plugin 與 npx skills 裝的 skill 的版號（取自 `installed_plugins.json` 與 lock 檔），見 `hooks/versions.ts` */
+      skillVersions: {
+        plugins: Record<string, { label: string; date: string }>
+        skills: Record<string, { label: string; date: string }>
+      }
       /** 展開的 [SKILL] 組 id（預設收合） */
       openSkillGroups: string[]
       /** [SKILL] 在開關模式（按 o 進出；不跨 session） */

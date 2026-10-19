@@ -344,6 +344,7 @@ node scripts/publish.mjs v0.6.0      # 退版：重發先前發布過的那一�
 | `hooks/switches.ts` | SKILL 的開關：哪些 skill 關著、組與分類的開／關／部分與 token 合計、按組或分類時改哪些、`settings.local.json` 怎麼改、分類標題列、分頁籤與開關按鈕的字、按完的提示；`switchboard` 一次給出畫面上每個 skill、組、分類的狀態與按下去做什麼，`planSwitch` 決定按下去之後寫什麼、要不要代跑重載；停用整個 plugin：哪一組是 plugin 組（與分類裡有幾個）、`enabledPlugins` 的鍵、停用的 plugin 照樣列出的組 |
 | `hooks/translate.ts` | SKILL 說明的翻譯流程與快取 |
 | `hooks/source.ts` | 找一個 skill 的原文（SKILL.md）：各種來源的定位規則 |
+| `hooks/versions.ts` | [SKILL] 的版號：從 `installed_plugins.json` 與 `npx skills` 的 lock 檔讀出每個 skill、每個組的版號與更新日期 |
 | `hooks/howto.ts` | SKILL 用法的整理流程、快取與失效（程式裡用法叫 howto，`usage` 是用量） |
 | `hooks/howtoPage.ts` | 用法頁有哪些列、每一列是什麼字（教學的狀態、說明、標題線、四項用法） |
 | `hooks/material.ts` | 教學的原料：SKILL.md 加上它連結到的檔，讀到哪裡為止 |
