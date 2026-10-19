@@ -2,6 +2,10 @@
 
 每一版改了什麼，新的在最上面。
 
+## 0.8.5
+
+- [任務] 看不到任務清單時會告訴你原因：主模型是 Opus／Sonnet 5.5 這類新模型時，Claude Code 預設不讓模型寫任務清單，[任務] 只看得到 subagent 列。這時標題下會多一行黃字，提示在 `~/.claude/settings.json` 的 `env` 加上 `"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"`；加了不用重開，下一次送出 prompt 後提示就消失。
+
 ## 0.8.4
 
 - [SKILL] 看得到每個 plugin 與 skill 的版號，平常不佔版面：滑鼠停在 skill 上，說明區的標題寫著版號與更新日期（例如「v1.3.1 · 10-12」）；停在組名那一列，行尾也會浮出同樣的版號。用 `npx skills` 裝的顯示一串七碼的編號，官方 marketplace 的 plugin 顯示的也是編號；這兩種編號變了不一定代表那個 skill 有更新，看日期比較準。查不到版號的組（例如「我的 skill」）不顯示。

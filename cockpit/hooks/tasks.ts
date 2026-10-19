@@ -22,6 +22,20 @@ function withStatus(task: TaskItem, status: TaskStatus, now: number): TaskItem {
 export type Todo = { content: string; status: TaskStatus }
 
 /**
+ * 模型寫任務清單用的工具：有其中一個，[任務] 就有東西可畫。主模型是 Opus／Sonnet 5.5 這類新模型時，
+ * Claude Code 預設兩個都不給，要在 settings 的 env 設 `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`。
+ */
+const TASK_TOOLS = ['TaskCreate', 'TodoWrite']
+
+/** session 的工具裡有沒有任務工具 */
+export function hasTaskTools(names: readonly string[]): boolean {
+  return TASK_TOOLS.some(t => names.includes(t))
+}
+
+/** 沒有任務工具時，[任務] 標題下的提示 */
+export const NO_TASK_TOOLS_HINT = '這個 session 沒有任務工具；在 settings 的 env 加 CLAUDE_CODE_ENABLE_TODO_TOOLS=1'
+
+/**
  * TodoWrite 每次送來整份清單（每個 agent 各一份）：同名的任務沿用原本的時間與隱藏狀態，
  * 新的才建新項目；其他 agent 與 TaskCreate 來的任務不動。
  */

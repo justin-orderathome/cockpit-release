@@ -215,6 +215,8 @@ declare module 'claude-code' {
       board: TaskBoard
       /** 主對話清單的完成數與總數（分頁列的進度）；任務板寫入時順便算，數字變了才寫 */
       progress: { doneCount: number; total: number }
+      /** 這個 session 有沒有任務工具（TaskCreate 或 TodoWrite）；沒有時 [任務] 顯示怎麼打開。查到之前是 true */
+      taskTools: boolean
       /** 每秒跳動一次，讓進行中任務的耗時重畫 */
       tick: number
       tab: Tab

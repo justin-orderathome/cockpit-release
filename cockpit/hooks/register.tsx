@@ -76,9 +76,11 @@ import type { TutorialState, TutorialTarget } from './tutorial'
 import type { Elements, TabContent, TabContext } from './tab'
 import {
   EMPTY_BOARD,
+  NO_TASK_TOOLS_HINT,
   agentCells,
   agentLabels,
   formatDuration,
+  hasTaskTools,
   taskCells,
   timingOf,
   viewTasks,
@@ -121,6 +123,8 @@ const switching = atom({ plugin: 'cockpit', key: 'switching' } as const, '' as '
 const usage = atom({ plugin: 'cockpit', key: 'usage' } as const, { rateLimits: [] } as UsageSnapshot)
 const alerted = atom({ plugin: 'cockpit', key: 'alerted' } as const, [] as string[])
 const board = atom({ plugin: 'cockpit', key: 'board' } as const, EMPTY_BOARD as TaskBoard)
+// 查到之前當作有：不先閃一下提示
+const taskTools = atom({ plugin: 'cockpit', key: 'taskTools' } as const, true)
 // 任務板的完成數與總數：外框（分頁列的進度）只讀這個，任務板寫入時順便算、數字變了才寫
 const progress = atom({ plugin: 'cockpit', key: 'progress' } as const, { doneCount: 0, total: 0 } as Progress)
 const tab = atom({ plugin: 'cockpit', key: 'tab' } as const, 'tasks' as Tab)
@@ -255,6 +259,7 @@ type Plan = {
   roadmap?: Of<typeof roadmap>
   handled?: Of<typeof handled>
   tab?: Of<typeof tab>
+  taskTools?: Of<typeof taskTools>
 }
 
 /**
@@ -295,6 +300,7 @@ async function planWrites($: EngineInterface, plan: Plan): Promise<Write[]> {
     keep(plan.roadmap, () => read($, roadmap), v => () => update($, roadmap, () => v)),
     keep(plan.handled, () => read($, handled), v => () => update($, handled, () => v)),
     keep(plan.tab, () => read($, tab), v => () => update($, tab, () => v)),
+    keep(plan.taskTools, () => read($, taskTools), v => () => update($, taskTools, () => v)),
   ])
   return writes.flat()
 }
@@ -321,12 +327,25 @@ async function readEffort($: EngineInterface): Promise<string> {
 
 /** 重新讀取模型；選的深度只在尚未得知時才從設定補上，之後以 /effort 的參數為準。 */
 async function refresh($: EngineInterface) {
+  // 換模型可能換掉任務工具（新模型預設沒有），一起查
+  void checkTaskTools($)
   const current = await $.session.model()
   await commit($, { model: current })
   if ((await read($, chosenEffort)) !== '') return
   const level = await readEffort($)
   const fill = (known: string) => known || level
   if (level && changes(await read($, chosenEffort), fill)) await update($, chosenEffort, fill)
+}
+
+/**
+ * 這個 session 有沒有任務工具（TaskCreate 或 TodoWrite）。延後載入的工具也列在 `$.tool.list()` 裡；
+ * 查不到時維持原狀，不顯示提示。
+ */
+async function checkTaskTools($: EngineInterface) {
+  try {
+    const names = (await $.tool.list()).map(t => t.name)
+    await commit($, { taskTools: hasTaskTools(names) })
+  } catch {}
 }
 
 /** 以 slash command 切換，完成後更新顯示。 */
@@ -1116,13 +1135,14 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
   // 會隨時間變的字畫成 Client，在畫面那一側自己走；沒有 Client 的介面畫成這一刻的樣子，下次重繪才更新
   const Client = 'Client' in ui ? ui.Client : undefined
   // 這個分頁要用的狀態一次讀完
-  const [taskBoard, efforts, showDone, open, folds, handledNow] = await Promise.all([
+  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools] = await Promise.all([
     read($, board),
     read($, roadmap),
     read($, showDoneEfforts),
     read($, openEfforts),
     read($, roadmapFolds),
     read($, handled),
+    read($, taskTools),
   ])
   const view = viewTasks(taskBoard, now)
   const main = view.main
@@ -1142,7 +1162,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
         : main.remainingMs !== undefined
           ? ` · 還需約 ${formatDuration(main.remainingMs)}`
           : ''
-  const top = (
+  const headLine = (
     <Box key="tasks-head" flexDirection="row" gap={2}>
       {isCounting && Client ? (
         // 「還需約」每秒走：交給 Client，數字照主清單還沒完成的列往後推
@@ -1162,6 +1182,17 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
           </Text>
         </Box>
       )}
+    </Box>
+  )
+  // 沒有任務工具時，模型寫不出清單：標題下多一行告訴使用者怎麼打開
+  const top = hasTools ? (
+    headLine
+  ) : (
+    <Box key="tasks-top" flexDirection="column">
+      {headLine}
+      <Text key="no-task-tools" color="warning" wrap="truncate-end">
+        {NO_TASK_TOOLS_HINT}
+      </Text>
     </Box>
   )
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
@@ -1448,6 +1479,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
 
   return {
     top,
+    ...(hasTools ? {} : { topRows: 2 }),
     ...(actions === undefined ? {} : { actions, actionsWidth }),
     rows,
     emptyText: '模型使用待辦清單後，任務會顯示在這裡。',
@@ -2375,7 +2407,11 @@ export const register: Register = (on, options) => {
   // subagent 回報的通知不算：它的回報常寫著票的路徑，但做的不是主對話
   on('prompt.submit', async ($, e, next) => {
     const ran = await next(e)
-    if (!('drop' in ran) && e.origin.kind !== 'task-notification') later(() => touchTickets($, e.text, undefined))
+    if (!('drop' in ran) && e.origin.kind !== 'task-notification') {
+      later(() => touchTickets($, e.text, undefined))
+      // 設定改了 env 不用重開就生效：每次送出 prompt 重查一次任務工具
+      later(() => checkTaskTools($))
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
