@@ -2303,10 +2303,10 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // subagent 列：派出就建一行（醒來再派出只更新）；teammate 與 workflow 的 agent 不列
+  // subagent 列：派出就建一行（醒來再派出只更新）；帶名字派的 teammate 也列，workflow 的 agent 不列
   on('agent.spawn', async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && ran.agentId !== undefined && e.isTeammate !== true && e.workflow === undefined) {
+    if (ran.deny === undefined && ran.agentId !== undefined && e.workflow === undefined) {
       const agentId = ran.agentId
       const model = ran.model
       later(async () => {

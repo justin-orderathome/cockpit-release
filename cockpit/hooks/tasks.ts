@@ -193,15 +193,18 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
       if (event.agentId === undefined) return isSameUse(board.mainModel, use) ? board : { ...board, mainModel: use }
       const known = board.agents.find(g => g.id === event.agentId)
       if (known === undefined) {
-        // 比 agent.spawn 早到：先記著，派出時補上。永遠不會派出的（teammate、workflow）也會來，只留最近幾筆
+        // 比 agent.spawn 早到：先記著，派出時補上。永遠不會派出的（workflow）也會來，只留最近幾筆
         const early = board.earlySteps ?? {}
         if (isSameUse(early[event.agentId], use)) return board
         const { [event.agentId]: _, ...others } = early
         const kept = Object.entries(others).slice(-(EARLY_STEPS - 1))
         return { ...board, earlySteps: { ...Object.fromEntries(kept), [event.agentId]: use } }
       }
-      if (isSameUse(known.model, use)) return board
-      return { ...board, agents: board.agents.map(g => (g === known ? { ...g, model: use } : g)) }
+      // teammate 閒著時收到訊息就醒來接著跑，不會再來一次 agent.spawn：它又走一步，列就回到進行中
+      const isWoken = known.state === 'done'
+      if (!isWoken && isSameUse(known.model, use)) return board
+      const woke: Partial<Subagent> = isWoken ? { state: 'running', endedAt: undefined } : {}
+      return { ...board, agents: board.agents.map(g => (g === known ? { ...g, ...woke, model: use } : g)) }
     }
     case 'ended': {
       const state = stateAfter(event.reason, event.status)
