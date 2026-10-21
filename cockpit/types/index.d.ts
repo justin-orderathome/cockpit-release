@@ -138,6 +138,31 @@ export type BackgroundList = {
   cronListAccess?: 'allow' | 'other'
 }
 
+/** 等你決定的對話框種類：權限核准、AskUserQuestion、核准計畫（ExitPlanMode）、MCP elicitation */
+export type DecisionKind = 'permission' | 'question' | 'plan' | 'elicitation'
+
+/** 一個等你決定的對話框。以 loop 為單位記（`PermissionRequest` 沒有 `tool_use_id`），主對話的 `agentId` 是 undefined */
+export type Decision = {
+  agentId?: string
+  /** subagent 的描述（[任務] 列上那個）；主對話、或跳出時還不知道描述的沒有 */
+  label?: string
+  kind: DecisionKind
+  /** 顯示用：權限是工具與內容（`Bash \`git push\``），問題是第一個問題，elicitation 是伺服器與訊息；計畫沒有 */
+  detail?: string
+  /** MCP elicitation 的 id（`ElicitationResult` 照它對上）；其他種類沒有 */
+  elicitationId?: string
+  /** 開始的時刻（引擎的時鐘，毫秒） */
+  since: number
+}
+
+/** 在等你（狀態框那一行，放 `$.state`），見 `hooks/waiting.ts` */
+export type Waiting = {
+  /** 等你決定的對話框，照開始的先後 */
+  decisions: Decision[]
+  /** 主對話一輪結束的時刻；沒有就是不是輪到你 */
+  turnOverSince?: number
+}
+
 /** 票的種類：地圖底下的決策票，或 /to-tickets 拆出來的實作票 */
 export type TicketKind = 'decision' | 'build'
 
@@ -155,7 +180,10 @@ export type Ticket = {
   state: TicketState
   /** 還沒結案、卡住這張票的編號 */
   waitingOn: string[]
-  /** 票的問題（`## Question`）或要做的內容（`**What to build:**`） */
+  /**
+   * 說明區的字：票的問題（`## Question`）或要做的內容（`**What to build:**`）；
+   * 結案的決策票改成要點（地圖的「已定：…」「不做：…」，或 `## Answer` 第一段）
+   */
   detail?: string
 }
 
@@ -294,6 +322,8 @@ declare module 'claude-code' {
       background: BackgroundList
       /** 「背景」子分頁的「▸ 更早的 N 筆」攤開了沒（只記這個 session） */
       backgroundOlderOpen: boolean
+      /** 在等你：等你決定的對話框與輪到你的開始時刻（只記這個 session），見 `hooks/waiting.ts` */
+      waiting: Waiting
       /** 各分頁目前的頁碼（從 0 起）；[任務] 的頁碼在換子分頁時回到 0 */
       pages: Record<Tab, number>
       prompts: PromptGroup[]
@@ -312,6 +342,18 @@ declare module 'claude-code' {
       }
       /** 展開的 [SKILL] 組 id（預設收合） */
       openSkillGroups: string[]
+      /**
+       * skill 的叫用紀錄（全域，和 `$.store` 的 `skillCalls` 同一份），見 `hooks/skillCalls.ts`：
+       * `since` 是開始記錄日，`calls` 是 skill 名稱 → 次數與最後一次的日期（都是 `YYYY-MM-DD`）
+       */
+      skillCalls: { since: string; calls: Record<string, { count: number; last: string }> }
+      /**
+       * 正在用的 skill（只在這個 session），見 `hooks/skillCalls.ts` 的 `SkillInUse`：
+       * `main` 是主對話的，`agents` 是 subagent 的 id → skill 名稱
+       */
+      skillInUse: { main?: string; agents: Record<string, string> }
+      /** 套用過的範本項目（全域，和 `$.store` 的 `appliedTemplate` 同一份），識別怎麼寫見 `hooks/templates.ts` */
+      appliedTemplate: string[]
       /** [SKILL] 在開關模式（按 o 進出；不跨 session） */
       switchMode: boolean
       /** 目前專案 `.claude/settings.local.json` 的 `skillOverrides`；切到 [SKILL] 時重讀 */

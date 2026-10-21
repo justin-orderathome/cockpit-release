@@ -4,9 +4,11 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 import type {
   BackgroundList,
   CommandEntry,
+  Decision,
   Effort,
   EffortLevel,
   FrontmatterEntry,
+  PromptEntry,
   PromptGroup,
   SkillGroup,
   SkillItem,
@@ -16,6 +18,7 @@ import type {
   TaskBoard,
   Ticket,
   UsageSnapshot,
+  Waiting,
 } from '../types'
 import {
   EMPTY_BACKGROUND,
@@ -42,17 +45,29 @@ import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
 import { viewHowtoPage } from './howtoPage'
-import { ROW_GAP, chrome, fitText, foldLabel, footPlan, footWidth, gridRows, gridSlots, layout, tabBar as tabBarOf, tailWidth, textWidth } from './layout'
+import { ROW_GAP, TOKEN_CELLS, chrome, fitText, foldLabel, footPlan, footWidth, gridRows, gridSlots, layout, tabBar as tabBarOf, tailWidth, textWidth } from './layout'
 import type { Row } from './layout'
 import { sessionMemory } from './memory'
 import type { Reload } from './memory'
 import { singleJob } from './once'
 import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
+import { branchOf, latestMainTicket, missingNotice, substitute, variablesIn } from './variables'
+import type { VariableName, VariableValues } from './variables'
 import { INDICATOR_MARK, STARTUP_CHECK_DELAY, SWITCH_NOW, indicatorFor, installedFrom, versionIn } from './release'
 import type { Indicator, Install } from './release'
 import { startTab, storedList, storedText, storedTranslations, toggled } from './remembered'
 import { cronCreatedSignal, monitorSignal, wakeupSignal, workflowSignal } from './backgroundSource'
 import type { BackgroundPorts, BackgroundSignal } from './backgroundSource'
+import {
+  TEMPLATE_PROMPTS,
+  TEMPLATE_SKILLS,
+  appliedToast,
+  applyPromptTemplate,
+  applySkillTemplate,
+  newTemplateItems,
+  templateButtonLabel,
+} from './templates'
+import type { SkillApply } from './templates'
 import { roadmapSource, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
 import { changes, isSame } from './same'
@@ -68,6 +83,18 @@ import {
 } from './skills'
 import type { SkillCatalog, SkillSources } from './skills'
 import { findSkillFile } from './source'
+import {
+  NO_SKILL_CALLS,
+  NO_SKILL_IN_USE,
+  callText,
+  callsOf,
+  isUsing,
+  skillCallers,
+  startedCalls,
+  storedSkillCalls,
+  withCall,
+} from './skillCalls'
+import type { SkillCalls, SkillInUse } from './skillCalls'
 import { NO_VERSIONS, groupVersion, groupVersionText, lockVersions, mergeLockVersions, pluginVersions, versionOf } from './versions'
 import type { SkillVersions } from './versions'
 import {
@@ -108,6 +135,8 @@ import type { Translations } from './translate'
 import { makeUpdater } from './updater'
 import type { Updater, UpdaterPorts } from './updater'
 import { USAGE_HINT, checkAlerts, chipArea, chipColor, chipParts, shortTokens } from './usage'
+import { NO_WAITING, applyWaiting, decisionOf, elicitationOf, marksOf, needsLook, waitingAgents, waitingLine } from './waiting'
+import type { WaitingEvent } from './waiting'
 
 /**
  * 面板裡所有會碰到引擎的程式都在這個檔案，這是引擎的規定：`$` 只能傳給同一個檔案裡宣告的函式，
@@ -168,6 +197,26 @@ const skillSources = atom({ plugin: 'cockpit', key: 'skillSources' } as const, N
 /** plugin 與 npx skills 裝的 skill 的版號；停在 skill 或組名上才顯示 */
 const skillVersions = atom({ plugin: 'cockpit', key: 'skillVersions' } as const, NO_VERSIONS as SkillVersions)
 const openSkillGroups = atom({ plugin: 'cockpit', key: 'openSkillGroups' } as const, [] as string[])
+/** skill 的叫用紀錄（全域，跨 session、不分專案）：和 `$.store` 的 `skillCalls` 同一份，開場讀回、叫用一次存一次 */
+const skillCalls = atom({ plugin: 'cockpit', key: 'skillCalls' } as const, NO_SKILL_CALLS as SkillCalls)
+/** 套用過的範本項目（全域）：和 `$.store` 的 `appliedTemplate` 同一份，開場讀回、套用時存；[設定] 算「範本有 N 項新的」讀它 */
+const appliedTemplate = atom({ plugin: 'cockpit', key: 'appliedTemplate' } as const, [] as string[])
+/**
+ * 正在用的 skill（主對話的與每個 subagent 的）：[SKILL] 的「●」與 subagent 列說明區的「用 …」看它。
+ * 只在這個 session（`$.state`），不存回 `$.store`；什麼時候換、什麼時候結束由 `skillCallers` 決定，這裡是畫面上那一份
+ */
+const skillInUse = atom({ plugin: 'cockpit', key: 'skillInUse' } as const, NO_SKILL_IN_USE as SkillInUse)
+/** 正在用的記號：[SKILL] 名稱前、收合的組名列（▸ 後）都用這一個，佔 1 格 */
+const IN_USE_MARK = '●'
+
+/**
+ * 記下現在正在用的（`callers` 那一份）；回傳的函式說之後換了沒。
+ * 動 `callers` 的地方（叫用、送出 prompt、一輪結束）都用它判斷要不要寫畫面上的正在用。
+ */
+function watchInUse(): () => boolean {
+  const was = callers.inUse()
+  return () => callers.inUse() !== was
+}
 const switchMode = atom({ plugin: 'cockpit', key: 'switchMode' } as const, false)
 const skillSwitches = atom({ plugin: 'cockpit', key: 'skillSwitches' } as const, {} as Record<string, unknown>)
 const pluginSwitches = atom({ plugin: 'cockpit', key: 'pluginSwitches' } as const, {} as Record<string, unknown>)
@@ -190,6 +239,11 @@ const roadmapFolds = atom({ plugin: 'cockpit', key: 'roadmapFolds' } as const, {
 const showDoneEfforts = atom({ plugin: 'cockpit', key: 'showDoneEfforts' } as const, false)
 /** 這個 session 經手的票 → 最近一次經手的 loop；只記這個 session，不寫進票檔 */
 const handled = atom({ plugin: 'cockpit', key: 'handled' } as const, {} as Handled)
+/**
+ * 在等你（狀態框模型那一行下面）：等你決定的對話框與輪到你的開始時刻。只在這個 session（`$.state`），
+ * /clear 與 resume 隨 `$.state` 清空。有沒有在等的摘要另記在 `memory.waiting`，每一步先看它
+ */
+const waiting = atom({ plugin: 'cockpit', key: 'waiting' } as const, NO_WAITING as Waiting)
 /** 上次查到的發布版本，留著的標示看它；'' 是還沒查到過。只有從 marketplace 裝的那一份會寫 */
 const releasedVersion = atom({ plugin: 'cockpit', key: 'releasedVersion' } as const, '')
 /** 已經下載、還沒換上的版本，標示是不是「已下載」看它；'' 是沒有 */
@@ -218,6 +272,11 @@ const roadmapFrom = roadmapSource()
 // 為了少問引擎、少讀檔而記在模組裡的東西；session 開始與 /clear 時各忘掉哪些，由 memory 決定
 const memory = sessionMemory()
 const { dirs, missedTranslations } = memory
+/**
+ * skill 的叫法：Skill 工具、手打 `/name` 與預載怎麼分（規則在 skillCalls.ts）。只記這個 session 進行中的事，
+ * 模組重載時重來；/clear 不必忘（進行中的工具呼叫照樣會結束）
+ */
+const callers = skillCallers()
 /** 用法每整理好幾個才存一次（整份快取每次都要重寫） */
 const HOWTO_SAVE_EVERY = 10
 
@@ -276,6 +335,8 @@ type Plan = {
   overrides?: Of<typeof overrides>
   skillSources?: Of<typeof skillSources>
   skillVersions?: Of<typeof skillVersions>
+  skillCalls?: Of<typeof skillCalls>
+  appliedTemplate?: Of<typeof appliedTemplate>
   skillSwitches?: Of<typeof skillSwitches>
   pluginSwitches?: Of<typeof pluginSwitches>
   skillCategory?: Of<typeof skillCategory>
@@ -318,6 +379,8 @@ async function planWrites($: EngineInterface, plan: Plan): Promise<Write[]> {
     keep(plan.overrides, () => read($, overrides), v => () => update($, overrides, () => v)),
     keep(plan.skillSources, () => read($, skillSources), v => () => update($, skillSources, () => v)),
     keep(plan.skillVersions, () => read($, skillVersions), v => () => update($, skillVersions, () => v)),
+    keep(plan.skillCalls, () => read($, skillCalls), v => () => update($, skillCalls, () => v)),
+    keep(plan.appliedTemplate, () => read($, appliedTemplate), v => () => update($, appliedTemplate, () => v)),
     keep(plan.skillSwitches, () => read($, skillSwitches), v => () => update($, skillSwitches, () => v)),
     keep(plan.pluginSwitches, () => read($, pluginSwitches), v => () => update($, pluginSwitches, () => v)),
     keep(plan.skillCategory, () => read($, skillCategory), v => () => update($, skillCategory, () => v)),
@@ -881,6 +944,142 @@ async function openChangelog($: EngineInterface) {
   await openInEditor($, path, undefined, '已開啟更新紀錄')
 }
 
+// plugin 裡的範本：每個檔第一次要畫 [設定] 時讀一次（範本跟著版本走，換版會重載模組，重來一次）
+const templateTexts = new Map<string, string | undefined>()
+
+/** plugin 裡的一個範本（`templates.ts` 的 TEMPLATE_*）；這一版沒有這個範本是 undefined */
+async function readTemplate($: EngineInterface, file: string): Promise<string | undefined> {
+  if (!templateTexts.has(file)) templateTexts.set(file, await files($).read(`${tidy($.plugin.root)}/${file}`))
+  return templateTexts.get(file)
+}
+
+/**
+ * 「範本有 N 項新的」：plugin 裡的範本對上套用紀錄（`appliedTemplate` atom）與本機的 prompts.md、skills.json
+ * （規則在 `templates.ts`）。只在畫 [設定] 時算；只讀檔、不下載（規範 R-07）。
+ * 本機的檔存在卻讀不出來時那一半不算，和套用時一樣（R-02：讀不到不當成不存在）；讀得到時不多問在不在。
+ * 別的 session 套用過的，本機檔已經有那些項目，算出來一樣不會多。
+ */
+async function newTemplateCount($: EngineInterface): Promise<number> {
+  const home = await homeDir($)
+  const disk = files($)
+  const pairOf = async (half: TemplateHalf) => {
+    const template = await readTemplate($, half.file)
+    if (template === undefined) return undefined
+    const path = `${home}/.claude/cockpit/${half.local}`
+    const local = await disk.read(path)
+    if (local === undefined && (await $.fs.exists(path))) return undefined
+    return [local, template] as const
+  }
+  const [prompts, skills, applied] = await Promise.all([
+    pairOf(TEMPLATE_HALVES.prompts),
+    pairOf(TEMPLATE_HALVES.skills),
+    read($, appliedTemplate),
+  ])
+  return newTemplateItems({ ...(prompts && { prompts }), ...(skills && { skills }) }, applied)
+}
+
+/** 這一版的 plugin 有沒有範本（兩個都沒有時「套用範本」不顯示） */
+const hasTemplates = async ($: EngineInterface) =>
+  (await readTemplate($, TEMPLATE_PROMPTS)) !== undefined || (await readTemplate($, TEMPLATE_SKILLS)) !== undefined
+
+/** 套用範本的一半：哪個範本、套到哪個全域檔（說給使用者聽的路徑）、合併規則 */
+type TemplateHalf = {
+  file: string
+  local: string
+  shown: string
+  /** 兩半都有範本、這一半失敗時 toast 的開頭（只有一半時說「沒有套用範本」） */
+  failed: string
+  apply: (local: string | undefined, template: string, applied: readonly string[]) => SkillApply
+}
+
+const TEMPLATE_HALVES = {
+  prompts: {
+    file: TEMPLATE_PROMPTS,
+    local: 'prompts.md',
+    shown: '~/.claude/cockpit/prompts.md',
+    failed: '沒有套用常用 prompt',
+    apply: (local, template, applied) => ({ kind: 'ok', ...applyPromptTemplate(local, template, applied) }),
+  },
+  skills: {
+    file: TEMPLATE_SKILLS,
+    local: 'skills.json',
+    shown: '~/.claude/cockpit/skills.json',
+    failed: '沒有套用 SKILL 覆寫',
+    apply: applySkillTemplate,
+  },
+} satisfies Record<string, TemplateHalf>
+
+/**
+ * 套用一半：讀本機的檔、合併、寫入前備份 `.bak`（每次覆蓋上一份），本機還沒有檔案就直接建立。
+ * 本機的檔存在卻讀不出來、或讀不懂時不寫（規範 R-02）。成功時回加了幾項與新的套用紀錄，失敗時回原因。
+ */
+async function applyHalf(
+  $: EngineInterface,
+  half: TemplateHalf,
+  template: string,
+  applied: readonly string[],
+): Promise<{ added: number; applied: string[] } | { reason: string }> {
+  const path = `${await homeDir($)}/.claude/cockpit/${half.local}`
+  const disk = files($)
+  const local = await disk.read(path)
+  if (local === undefined && (await $.fs.exists(path))) return { reason: `讀不到 ${half.shown}，請自己檢查後再按` }
+  const result = half.apply(local, template, applied)
+  if (result.kind === 'broken') return { reason: `讀不懂 ${half.shown}，請修好後再按` }
+  if (result.added > 0) {
+    if (local !== undefined) {
+      try {
+        await disk.write(`${path}.bak`, local)
+      } catch (err) {
+        return { reason: `寫不進 ${half.shown}.bak：${reasonOf(err)}` }
+      }
+    }
+    try {
+      await disk.write(path, result.text)
+    } catch (err) {
+      // 沒寫成就不記套用過，下次按還會加；備份留著
+      return { reason: `寫不進 ${half.shown}：${reasonOf(err)}` }
+    }
+  }
+  return { added: result.added, applied: result.applied }
+}
+
+/**
+ * [設定] 的「套用範本」：一次套用兩個檔案（常用 prompt 與 SKILL 覆寫），只加不改（規則在 `templates.ts`）。
+ * 兩半各自成敗：一半讀不到、讀不懂或寫不進時，另一半照常，toast 一起說明。
+ * 專案層的 `.claude/prompts.md` 不碰。範本只讀 plugin 自己的資料夾，不下載（規範 R-07）。
+ */
+async function applyTemplate($: EngineInterface) {
+  const halves: [keyof typeof TEMPLATE_HALVES, TemplateHalf, string][] = []
+  for (const [key, half] of Object.entries(TEMPLATE_HALVES) as [keyof typeof TEMPLATE_HALVES, TemplateHalf][]) {
+    const template = await readTemplate($, half.file)
+    if (template !== undefined) halves.push([key, half, template])
+  }
+  if (halves.length === 0) return
+  // 先讀 store 裡最新的（別的 session 可能剛套用過），套用完再寫回 store 與畫面
+  const stored = storedList(await $.store.get('appliedTemplate')) ?? []
+  let applied = stored
+  const added: { prompts?: number; skills?: number } = {}
+  const failures: string[] = []
+  for (const [key, half, template] of halves) {
+    const result = await applyHalf($, half, template, applied)
+    if ('reason' in result) {
+      failures.push(`${halves.length > 1 ? half.failed : '沒有套用範本'}：${result.reason}`)
+      continue
+    }
+    added[key] = result.added
+    applied = result.applied
+  }
+  // 套用紀錄（全域）：沒變就不寫
+  if (applied.length !== stored.length) await $.store.set('appliedTemplate', applied)
+  const succeeded = Object.keys(added).length > 0
+  $.ui.toast([...(succeeded ? [appliedToast(added)] : []), ...failures].join('；'))
+  if ((added.prompts ?? 0) > 0) await loadPrompts($)
+  // 畫面上的套用紀錄換成新的，「範本有 N 項新的」跟著重算。紀錄沒變、本機檔卻加了東西時
+  // （範本項目早就記過、同事刪了檔又按）atom 不變、不會自己重畫，這時才另外要一次
+  if (changes(await read($, appliedTemplate), () => applied)) await update($, appliedTemplate, () => applied)
+  else if ((added.prompts ?? 0) + (added.skills ?? 0) > 0) $.ui.invalidate('ui.render')
+}
+
 // ── 填入輸入框 ───────────────────────────────────────────
 
 async function fillPrompt($: EngineInterface, text: string, label: string) {
@@ -900,6 +1099,56 @@ async function submitPrompt($: EngineInterface, text: string, label: string) {
   } catch (err) {
     $.ui.toast(`無法送出「${label}」：${reasonOf(err)}`)
   }
+}
+
+/**
+ * [基本] 點了一筆常用 prompt：先代換 prompt 變數（`{{票}}`、`{{分支}}`）再填入或送出。
+ * 沒有認得的變數就不讀任何東西，照原本的流程；取不到的留原字、跳 toast，直接送出的改成只填入、不送出。
+ */
+async function usePrompt($: EngineInterface, p: PromptEntry) {
+  const names = variablesIn(p.body)
+  const { text, missing } =
+    names.length === 0 ? { text: p.body, missing: [] } : substitute(p.body, await variableValues($, names))
+  if (missing.length === 0) return p.isSubmit ? submitPrompt($, text, p.name) : fillPrompt($, text, p.name)
+  try {
+    const box = await $.prompt.read()
+    await $.prompt.fill(composeFill(box.text, text))
+    $.ui.toast(missingNotice(missing))
+  } catch (err) {
+    $.ui.toast(`無法填入「${p.name}」：${reasonOf(err)}`)
+  }
+}
+
+/** 點下去時才取 prompt 變數的值；只取文字裡有的。取不到的不放 */
+async function variableValues($: EngineInterface, names: readonly VariableName[]): Promise<VariableValues> {
+  const values: VariableValues = {}
+  if (names.includes('票')) {
+    try {
+      const ticket = latestMainTicket(await read($, handled), await projectRoot($))
+      if (ticket !== undefined) values.票 = ticket
+    } catch (err) {
+      $.ui.log(`取 {{票}} 失敗：${reasonOf(err)}`, { to: 'debug' })
+    }
+  }
+  if (names.includes('分支')) {
+    try {
+      const branch = await currentBranch($)
+      if (branch !== undefined) values.分支 = branch
+    } catch (err) {
+      $.ui.log(`取 {{分支}} 失敗：${reasonOf(err)}`, { to: 'debug' })
+    }
+  }
+  return values
+}
+
+/**
+ * 目前的 git 分支：在 repo 根目錄直接執行 git，不經 shell（規範 R-01）。
+ * 不在 git repo（`repo()` 是 null）、detached HEAD 都是 undefined。
+ */
+async function currentBranch($: EngineInterface): Promise<string | undefined> {
+  const repo = await $.session.repo()
+  if (repo === null || repo.root === '') return undefined
+  return branchOf(await $.process.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repo.root }))
 }
 
 // ── 分頁與摺疊 ───────────────────────────────────────────
@@ -949,7 +1198,8 @@ async function toggleFold($: EngineInterface, fold: Fold, id: string) {
  * 更新用的鍵（記著的版本）由 `updater.ts` 的 `open` 讀回。
  */
 async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown }> {
-  const [lastTab, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, category] = await Promise.all([
+  const [lastTab, cachedTranslations, cachedHowtos, efforts, skillGroups, promptGroups, category, calls, templateRecord, now] =
+    await Promise.all([
     $.store.get('lastTab'),
     $.store.get('translations'),
     $.store.get('howtos'),
@@ -957,6 +1207,9 @@ async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown
     $.store.get('openSkillGroups'),
     $.store.get('closedPromptGroups'),
     $.store.get('skillCategory'),
+    $.store.get('skillCalls'),
+    $.store.get('appliedTemplate'),
+    $.clock.now(),
   ])
   const openE = (list: string[]) => storedList(efforts) ?? list
   const openS = (list: string[]) => storedList(skillGroups) ?? list
@@ -965,13 +1218,53 @@ async function restoreRemembered($: EngineInterface): Promise<{ lastTab: unknown
   const translated = storedTranslations(cachedTranslations)
   // 用法的快取：形狀不對或舊版 prompt 整理的不收
   const cached = storedHowtos(cachedHowtos)
+  // 叫用紀錄：還沒開始記錄（第一次開）時記下今天是開始記錄日，之後沒用過的 skill 從這天算起
+  const kept = storedSkillCalls(calls)
+  const started = startedCalls(kept, dateOf(now))
   await Promise.all([
+    started === kept ? undefined : $.store.set('skillCalls', started),
     (async () => void (changes(await read($, openEfforts), openE) && (await update($, openEfforts, openE))))(),
     (async () => void (changes(await read($, openSkillGroups), openS) && (await update($, openSkillGroups, openS))))(),
     (async () => void (changes(await read($, closedPromptGroups), closedP) && (await update($, closedPromptGroups, closedP))))(),
-    commit($, { skillCategory: picked, translations: translated, howtos: cached }),
+    commit($, {
+      skillCategory: picked,
+      translations: translated,
+      howtos: cached,
+      skillCalls: started,
+      appliedTemplate: storedList(templateRecord) ?? [],
+    }),
   ])
   return { lastTab }
+}
+
+/**
+ * 叫用一次：這個 skill 的次數加一、最後改成今天。`$.store` 只有 get／set，先讀最新的（別的 session 可能剛寫過）、
+ * 只改這一筆再存，把互蓋的機會壓到最小；幾乎同時叫用時可能少算一次，可以接受。存一次、畫面寫一次。
+ * `isUseChanged`（正在用的換了）時，正在用的和次數一起寫，同一件事只重畫一次；`name` 沒有（例如「已載入」）就只寫正在用的。
+ */
+async function countSkillCall($: EngineInterface, name: string | undefined, isUseChanged = false) {
+  const counted = async (): Promise<Write[]> => {
+    if (name === undefined) return []
+    try {
+      const [stored, now] = await Promise.all([$.store.get('skillCalls'), $.clock.now()])
+      const next = withCall(storedSkillCalls(stored), name, dateOf(now))
+      await $.store.set('skillCalls', next)
+      return [() => update($, skillCalls, () => next)]
+    } catch (err) {
+      $.ui.log(`記 skill 叫用次數失敗（${name}）：${reasonOf(err)}`, { to: 'debug' })
+      return []
+    }
+  }
+  const [counts, uses] = await Promise.all([counted(), isUseChanged ? inUseWrites($) : []])
+  await writeAll([...counts, ...uses])
+}
+
+/**
+ * 正在用的：把 `callers` 記的那一份寫上畫面，跟畫面上一樣就不寫。寫的時候取當下最新的
+ * （排在 `later` 裡，之間又換過也只寫最後那一份）。
+ */
+async function inUseWrites($: EngineInterface): Promise<Write[]> {
+  return isSame(await read($, skillInUse), callers.inUse()) ? [] : [() => update($, skillInUse, () => callers.inUse())]
 }
 
 /** 打開一個 skill 的用法頁：從它的第一頁看起，並記下列表原本停在第幾頁。 */
@@ -1129,6 +1422,41 @@ async function taskWrites($: EngineInterface, step: BoardStep): Promise<Write[]>
   return boardWrites($, await boardState($), step)
 }
 
+// ── 在等你 ───────────────────────────────────────────────
+// 規則在 `waiting.ts`；這裡讀畫面上那一份、套一件事、跟畫面上不一樣才寫，並把摘要記進 memory
+
+/**
+ * 一件事要寫的在等你。先只看事件與 memory 的摘要（`needsLook`）：不必看就連狀態都不讀，零 host 呼叫。
+ * 呼叫的人把它和同一件事的其他寫入一起 `writeAll`，一件事只重畫一次
+ */
+async function waitingWrites($: EngineInterface, event: WaitingEvent): Promise<Write[]> {
+  if (!needsLook(memory.waiting, event)) return []
+  const shown = await read($, waiting)
+  const next = applyWaiting(shown, event)
+  memory.waiting = marksOf(next)
+  return next === shown ? [] : [() => update($, waiting, () => next)]
+}
+
+/**
+ * 跳出對話框的 subagent 的描述（[任務] 列上那個），狀態框要寫。主對話（沒有 agentId）不讀任務板；
+ * 列還沒建（派出前就跳出對話框）時是 undefined，那一行只寫「subagent」
+ */
+async function agentLabel($: EngineInterface, agentId: string | undefined): Promise<string | undefined> {
+  if (agentId === undefined) return undefined
+  return (await read($, board)).agents.find(g => g.id === agentId)?.label
+}
+
+/**
+ * 在等你：對話框跳出來了（權限核准、AskUserQuestion、核准計畫或 MCP elicitation），排到背景記上一筆等你決定。
+ * `decide` 用當下的時間與 subagent 的描述（主對話的是 undefined）做出那一筆；hook 本身不等它。
+ */
+function askedLater($: EngineInterface, agentId: string | undefined, decide: (now: number, label: string | undefined) => Decision) {
+  later(async () => {
+    const [now, label] = await Promise.all([$.clock.now(), agentLabel($, agentId)])
+    await writeAll(await waitingWrites($, { kind: 'asked', decision: decide(now, label) }))
+  })
+}
+
 // ── 背景工作 ─────────────────────────────────────────────
 // 什麼時候問引擎什麼、要套哪個事件都在 `backgroundSource.ts`；這裡只組 ports、照回答寫
 
@@ -1253,7 +1581,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
   // 會隨時間變的字畫成 Client，在畫面那一側自己走；沒有 Client 的介面畫成這一刻的樣子，下次重繪才更新
   const Client = 'Client' in ui ? ui.Client : undefined
   // 這個分頁要用的狀態一次讀完
-  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools, chosenSubtab, works, showOlder] = await Promise.all([
+  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools, chosenSubtab, works, showOlder, waitingNow, using] = await Promise.all([
     read($, board),
     read($, roadmap),
     read($, showDoneEfforts),
@@ -1264,9 +1592,12 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     read($, subtab),
     read($, background),
     read($, backgroundOlderOpen),
+    read($, waiting),
+    read($, skillInUse),
   ])
-  // subagent 列的「· 背景 N」與背景說明區的「由 subagent「…」開」：兩份資料在這裡合起來，各自的狀態不互相塞
-  const view = viewTasks(taskBoard, now, runningByAgent(works))
+  // subagent 列的「· 背景 N」與背景說明區的「由 subagent「…」開」、在等你決定的 subagent 列的 ?、
+  // subagent 正在用的 skill（說明區的「用 …」）：幾份資料在這裡合起來，各自的狀態不互相塞
+  const view = viewTasks(taskBoard, now, runningByAgent(works), waitingAgents(waitingNow), using.agents)
   const bg = viewBackground(works, now, { showOlder, agents: taskBoard.agents })
   const main = view.main
   // 經手的票行尾標經手者的模型；路線圖整個算一塊，和 [任務] 清單分開決定完整或縮寫
@@ -1690,6 +2021,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
 /**
  * 組名列的字：組名加粗（掃讀時的錨點），個數暗色；裁到 `width` 格以內時先裁組名。
  * `isDim`（整組關掉）時整行變暗、不加粗。`count` 不給就不寫個數。
+ * `mark`（例如收合的組裡有正在用的 skill 時的「●」，佔 1 格）接在「▸ 」後、組名前，後面再空一格。
  */
 function groupHead(
   { Text }: Elements,
@@ -1698,13 +2030,28 @@ function groupHead(
   count: number | undefined,
   width: number,
   isDim = false,
+  mark?: JSX.Element,
 ) {
   const countText = count === undefined ? '' : ` (${count})`
-  const name = fitText(foldLabel(isOpen, title), Math.max(4, width - textWidth(countText)))
-  if (isDim) return <Text dimColor>{name + countText}</Text>
+  const markWidth = mark === undefined ? 0 : 2
+  const name = fitText(foldLabel(isOpen, title), Math.max(4, width - textWidth(countText) - markWidth))
+  // 「▸ 」與組名分開畫，記號才夾得進去；沒有記號時照原本一段字
+  const fold = mark === undefined ? '' : name.slice(0, 2)
+  const rest = mark === undefined ? name : name.slice(2)
+  const gap = mark === undefined ? '' : ' '
+  if (isDim)
+    return (
+      <Text dimColor>
+        {fold}
+        {mark}
+        {gap + rest + countText}
+      </Text>
+    )
   return (
     <Text>
-      <Text bold>{name}</Text>
+      <Text bold>{fold}</Text>
+      {mark}
+      <Text bold>{gap + rest}</Text>
       <Text dimColor>{countText}</Text>
     </Text>
   )
@@ -1755,7 +2102,7 @@ async function basicTab($: EngineInterface, { ui, cols, accent }: TabContext): P
               key={`prompt-btn-${p.id}`}
               label={fitText(`› ${p.name}`, room)}
               plain
-              onPress={() => void (p.isSubmit ? submitPrompt($, p.body, p.name) : fillPrompt($, p.body, p.name))}
+              onPress={() => void usePrompt($, p)}
             />
             {p.isSubmit && <Text color={accent}>⏎</Text>}
           </Box>
@@ -1836,6 +2183,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     enabledPlugins,
     installed,
     versionsKnown,
+    callsKnown,
+    using,
   ] = await Promise.all([
     $.state.get({ plugin: 'cockpit', key: 'howtos' } as const),
     $.state.get({ plugin: 'cockpit', key: 'commands' } as const),
@@ -1856,6 +2205,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     read($, pluginSwitches),
     read($, installedPluginKeys),
     read($, skillVersions),
+    read($, skillCalls),
+    read($, skillInUse),
   ])
   // 還沒寫過的狀態讀出來是 undefined（version 0），照 atom 的初始值
   const known = knownAt.value ?? howtos.initial
@@ -2070,25 +2421,44 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
     { hotkey: 'e', label: '編輯覆寫' },
   ])
 
+  /** 一個 skill 的叫用次數字樣：`12 次 · 最後 10/21`，沒用過的 `沒用過（自 10/21 起）`（日期取開始記錄日與版號更新日較晚的） */
+  const callsLine = (s: SkillItem) =>
+    callText(callsOf(callsKnown, s.name), callsKnown.since, versionOf(versionsKnown, s.name)?.date ?? '')
+  // 開關模式次數欄的寬度：這一次列出、有開關的 skill 裡最寬的那一個
+  const callsWidth = isSwitching
+    ? Math.max(0, ...view.groups.flatMap(g => g.items).filter(s => board.skill(s).press !== undefined).map(s => textWidth(callsLine(s))))
+    : 0
   /**
    * 開關模式裡一個 skill 的那一行：名稱、token 數與 [開]／[關]。
    * plugin 的 skill 沒有單獨的開關（要停用整個 plugin），行尾只有 token 數。
    */
   const switchRow = (s: SkillItem) => {
     const { isOff, tokens, press } = board.skill(s)
+    // 有開關的 skill，token 數左邊多一欄叫用次數（對齊成一欄，長名稱讓位）；token 數靠右對齊
+    const calls = press === undefined ? undefined : callsLine(s)
     const tail =
       press === undefined && tokens === undefined ? null : (
         <Box key={`switch-cell-${s.name}`} flexDirection="row" gap={1} flexShrink={0}>
-          {tokens === undefined ? null : <Text dimColor>{String(tokens)}</Text>}
+          {calls === undefined ? null : (
+            <Box key={`switch-calls-${s.name}`} width={callsWidth} flexShrink={0}>
+              <Text dimColor>{calls}</Text>
+            </Box>
+          )}
+          {tokens === undefined ? null : (
+            <Box key={`switch-tokens-${s.name}`} width={press === undefined ? undefined : TOKEN_CELLS} flexShrink={0} justifyContent="flex-end">
+              <Text dimColor>{String(tokens)}</Text>
+            </Box>
+          )}
           {press === undefined ? null : (
             <Button key={`switch-${s.name}`} label={isOff ? '關' : '開'} dimColor={isOff} onPress={() => void applySwitch($, press)} />
           )}
         </Box>
       )
-    const tailWidth = tail === null ? 0 : press === undefined ? TOKENS_TAIL : SWITCH_TAIL
+    const tailWidth = tail === null ? 0 : press === undefined ? TOKENS_TAIL : SWITCH_TAIL + callsWidth + 1
     return (
-      <Box flexDirection="row" paddingLeft={2} gap={1}>
-        <Box flexGrow={1} flexShrink={1}>
+      <Box flexDirection="row" paddingLeft={isInUse(s) ? 0 : 2} gap={1}>
+        <Box flexGrow={1} flexShrink={1} flexDirection="row">
+          {isInUse(s) ? inUseMark(s) : null}
           {skillButton(s, cols - 2 - tailWidth)}
         </Box>
         {tail}
@@ -2188,6 +2558,25 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
       onPress={() => void fillPrompt($, `/${s.name} `, s.label)}
     />
   )
+  /** 主對話正在用的是不是這個 skill（subagent 的不標在這裡，寫在它的 subagent 列） */
+  const isInUse = (s: SkillItem) => isUsing(using.main, s.name)
+  /** 主對話正在用的 skill 名稱前的「● 」（accent），和平常的「› 」或縮排一樣佔 2 格 */
+  const inUseMark = (s: SkillItem) => (
+    <Box key={`in-use-${s.name}`} flexDirection="row" flexShrink={0}>
+      <Text color={accent}>{IN_USE_MARK}</Text>
+      <Text> </Text>
+    </Box>
+  )
+  /** 一列 skill 的前面：正在用的換成「● 」，其他照原本的 2 格縮排 */
+  const markedRow = (s: SkillItem, content: JSX.Element) =>
+    isInUse(s) ? (
+      <Box flexDirection="row">
+        {inUseMark(s)}
+        {content}
+      </Box>
+    ) : (
+      <Box paddingLeft={2}>{content}</Box>
+    )
   /** 有用法的 skill 的「?」：點了開用法頁。平常藏著，停在那個 skill 上才出現，強調色才不會滿版都是 */
   const howtoMark = (s: SkillItem) =>
     s.howto ? (
@@ -2219,7 +2608,8 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         : undefined
     const found = versionOf(versionsKnown, s.name)
     const version = found === undefined ? undefined : groupVersionText(found)
-    return version === undefined ? howto : howto === undefined ? version : `${version} · ${howto}`
+    // 叫用次數接在版號後面、用法前面（每個 skill 都有，沒有開關的只在這裡看得到）
+    return [version, callsLine(s), howto].filter((t): t is string => t !== undefined).join(' · ')
   }
 
   /** 組名列浮出的版號字；組裡的 skill 版號不一致（例如混了來源的自訂組）就沒有 */
@@ -2256,6 +2646,9 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         ) : null
     const switchTailWidth = at.isPlugin && at.press !== undefined ? PLUGIN_SWITCH_TAIL : GROUP_SWITCH_TAIL
     const groupTailWidth = tail === null ? 0 : isSwitching ? switchTailWidth : GROUP_STATE_TAIL
+    // 收合的組裡有主對話正在用的 skill：組名列也帶「●」（▸ 後、組名前）；攤開時看名稱前的就好
+    const isUsingInside = !isOpen && g.items.some(isInUse)
+    const groupMark = isUsingInside ? <Text color={accent}>{IN_USE_MARK}</Text> : undefined
     rows.push({
       id: `skill-group-${g.id}`,
       group,
@@ -2267,7 +2660,10 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
               key={`sg-btn-${g.id}`}
               // 停用的 plugin 組是空的（skill 已經不在清單裡），不寫個數
               label={fitText(
-                foldLabel(isOpen, g.items.length === 0 ? g.title : `${g.title} (${g.items.length})`),
+                foldLabel(
+                  isOpen,
+                  `${isUsingInside ? `${IN_USE_MARK} ` : ''}${g.items.length === 0 ? g.title : `${g.title} (${g.items.length})`}`,
+                ),
                 cols - groupTailWidth,
               )}
               plain
@@ -2281,6 +2677,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
                 g.items.length === 0 ? undefined : g.items.length,
                 cols - groupTailWidth,
                 !isSwitching && tail !== null,
+                groupMark,
               )}
             </Button>
           </Box>
@@ -2319,6 +2716,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
           detailHint: howtoHint,
           cell: skillName,
           trailing: howtoMark,
+          mark: s => (isInUse(s) ? inUseMark(s) : undefined),
         }),
       )
       continue
@@ -2330,7 +2728,7 @@ async function skillTab($: EngineInterface, { ui, cols, accent }: TabContext): P
         group,
         detail: s.description,
         detailHint: howtoHint(s),
-        value: <Box paddingLeft={2}>{skillName(s, cols - 2)}</Box>,
+        value: markedRow(s, skillName(s, cols - 2)),
         ...(trailing === undefined ? {} : { trailing }),
       })
     }
@@ -2421,6 +2819,11 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   if (version === '') return { actions, actionsWidth, rows }
   const versionText = `cockpit ${version}`
   const checkLabel = indicator?.kind === 'downloaded' ? SWITCH_NOW : '檢查版本'
+  // 「套用範本」在檢查版本左邊；這一版的 plugin 沒有範本就不顯示。
+  // 範本有沒套用過的項目時換成高亮的「範本有 N 項新的」（寬度照這個字算，放不下就照 footPlan 退回框內）
+  const hasTemplate = await hasTemplates($)
+  const newItems = hasTemplate ? await newTemplateCount($) : 0
+  const templateLabel = templateButtonLabel(newItems)
   const status = (
     <Box key="settings-version" flexDirection="row" gap={2}>
       <Text dimColor>{versionText}</Text>
@@ -2428,6 +2831,20 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
         <Text bold color={INDICATOR_COLOR}>
           {indicator.text}
         </Text>
+      )}
+      {hasTemplate && (
+        <Button
+          key="apply-template"
+          label={templateLabel}
+          plain
+          onPress={() => void applyTemplate($).catch(err => $.ui.toast(`沒有套用範本：${reasonOf(err)}`))}
+        >
+          {newItems > 0 && (
+            <Text bold color={INDICATOR_COLOR}>
+              {templateLabel}
+            </Text>
+          )}
+        </Button>
       )}
       {indicator?.kind === 'downloaded' ? (
         <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void updaterOf($).then(u => u.reload())} />
@@ -2440,6 +2857,7 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   const statusWidth = footWidth([
     { plain: versionText },
     ...(indicator ? [{ plain: indicator.text }] : []),
+    ...(hasTemplate ? [{ plain: templateLabel }] : []),
     { plain: checkLabel },
     { plain: '更新紀錄' },
   ])
@@ -2466,6 +2884,8 @@ async function loadSession($: EngineInterface, reason: Reload) {
     tutorialMenu: false,
     handled: {},
   })
+  // 在等你：$.state 若沒跟著清空（mod 重載後開場），也對成沒在等，和 memory 的摘要一致
+  await writeAll(await waitingWrites($, { kind: 'reset' }))
   const { lastTab } = await restoreRemembered($)
   const first = startTab(config.settings.defaultTab, lastTab)
   await commit($, { tab: first })
@@ -2537,10 +2957,12 @@ export const register: Register = (on, options) => {
     const level = e.agentId === undefined && e.effort !== undefined ? String(e.effort) : undefined
     // 模型標示：每個 loop 記住最近一次的模型與深度，主對話的是基準；沒變就不寫，免得每一步都重畫
     const step: TaskEvent = { kind: 'step', agentId: e.agentId, model: e.model, effort: e.effort === undefined ? undefined : String(e.effort) }
+    // 在等你：這個 loop 往下走了，就是回應過對話框（核准、拒絕都接著下一步）。沒在等時 waitingWrites 不讀也不寫
+    const moved: WaitingEvent = { kind: 'moved', agentId: e.agentId }
     later(async () => {
       const isNew = level !== undefined && level !== memory.lastEffort
       if (isNew) memory.lastEffort = level
-      const writes = await Promise.all([planWrites($, isNew ? { effort: level } : {}), taskWrites($, { task: step })])
+      const writes = await Promise.all([planWrites($, isNew ? { effort: level } : {}), taskWrites($, { task: step }), waitingWrites($, moved)])
       await writeAll(writes.flat())
     })
     return yield* next(e)
@@ -2605,14 +3027,31 @@ export const register: Register = (on, options) => {
   // 經手：你送出的 prompt（包括按「繼續」填進去的）裡有票的路徑，算主對話經手。
   // subagent 回報的通知不算：它的回報常寫著票的路徑，但做的不是主對話
   on('prompt.submit', async ($, e, next) => {
+    // 叫用紀錄：你送出的 `/name` 記成等著的手打（展開可能在 next 裡就到），只動模組裡的記憶。
+    // 你送出新 prompt 也結束主對話的正在用（背景工作的通知不是 composer，不算）；沒在用就不碰畫面
+    const isUseChanged = watchInUse()
+    if (e.origin.kind === 'composer') callers.typed(e.text)
+    const isUseEnded = isUseChanged()
     const ran = await next(e)
     // 背景工作的結束通知：先看文字本身（沒有 <status> 的 Monitor 每行輸出不做任何事），有才排到背景
     const note = e.origin.kind === 'task-notification' ? parseNotification(e.text) : undefined
     if (note !== undefined) later(() => backgroundSignal($, { kind: 'notified', note }))
     // 排程觸發：讀 CronList 看是哪一個（清單裡沒有排程就什麼都不做）
     if (e.origin.kind === 'scheduled-trigger') later(() => backgroundSignal($, { kind: 'cronTriggered', text: e.text }))
-    if (!('drop' in ran) && e.origin.kind !== 'task-notification') {
-      later(() => touchTickets($, e.text, undefined))
+    const isDropped = 'drop' in ran
+    if (isUseEnded && isDropped) later(async () => writeAll(await inUseWrites($)))
+    if (!isDropped && e.origin.kind !== 'task-notification') {
+      // 經手、在等你與正在用一起寫：你自己送出的 prompt 結束輪到你，也拿掉主對話的等你決定
+      // （subagent 或背景工作的通知叫醒主對話不是你回來了，不算）
+      const isYours = e.origin.kind === 'composer'
+      later(async () => {
+        const [touched, waits, uses] = await Promise.all([
+          touchedBy($, e.text, undefined),
+          isYours ? waitingWrites($, { kind: 'prompted' }) : [],
+          isUseEnded ? inUseWrites($) : [],
+        ])
+        await writeAll([...waits, ...uses, ...(touched === undefined ? [] : await handledWrites($, touched))])
+      })
       // 設定改了 env 不用重開就生效：每次送出 prompt 重查一次任務工具
       later(() => checkTaskTools($))
     }
@@ -2623,17 +3062,72 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
     const owner = e.agentId
+    // 主對話一輪結束：等著的手打作廢（送出的 `/name` 不是 skill 時，不留到之後誤配），正在用的也結束
+    const isUseChanged = watchInUse()
+    if (owner === undefined) callers.turnEnded()
+    // 主對話的一輪結束：輪到你（按 Esc 中斷對話框也是這裡，那一輪的等你決定一起拿掉）；
+    // 正在用的也結束，一起寫（沒在用就不碰）
+    if (owner === undefined) {
+      const isUseEnded = isUseChanged()
+      later(async () => {
+        const now = await $.clock.now()
+        const [waits, uses] = await Promise.all([
+          waitingWrites($, { kind: 'ended', agentId: undefined, now }),
+          isUseEnded ? inUseWrites($) : [],
+        ])
+        await writeAll([...waits, ...uses])
+      })
+    }
     if (owner !== undefined)
       later(async () => {
+        // 在等你：它的一輪結束（含被 TaskStop 停掉、Esc）時它跳出的對話框也沒了，和它往下走一樣拿掉。
+        // 主對話的一輪結束不碰它的。沒在等時 waitingWrites 不讀也不寫；有寫時和任務板一起寫，只重畫一次
+        const waits = await waitingWrites($, { kind: 'moved', agentId: owner })
         // 一輪讀完：不認識的 agent 先擋掉，不問引擎；認識的照這一輪讀到的算
         const state = await boardState($)
-        if (!state.board.agents.some(g => g.id === owner)) return
+        if (!state.board.agents.some(g => g.id === owner)) {
+          // 沒有列的 agent（例如 workflow 的）：正在用的照樣忘掉，畫面上本來就沒標
+          callers.agentEnded(owner)
+          return await writeAll(waits)
+        }
         const [now, agents] = await Promise.all([$.clock.now(), $.agent.list()])
         const status = agents.find(a => a.id === owner)?.status
-        // 真的結束了（不是在等它派的子 agent）時，它經手的票由 board.ts 一起拿掉
-        await writeAll(boardWrites($, state, { task: { kind: 'ended', agentId: owner, reason: e.reason, status, now } }))
+        // 真的結束了（不是在等它派的子 agent）時，它經手的票由 board.ts 一起拿掉，正在用的 skill 也結束
+        const isEnded = watchInUse()
+        if (status !== 'waiting') callers.agentEnded(owner)
+        const uses = isEnded() ? await inUseWrites($) : []
+        await writeAll([...waits, ...boardWrites($, state, { task: { kind: 'ended', agentId: owner, reason: e.reason, status, now } }), ...uses])
       })
     return ran
+  }).catch(($, e, next) => next(e))
+
+  // skill 的叫用紀錄（規格書第四章）：`skill.prompt` 不帶是誰叫的，靠前後的事件判斷。
+  // Skill 工具：開始時記一筆進行中的呼叫，展開落在裡面；結束時看結果，「已載入」的不算。只有 Skill 工具才進來
+  // 正在用的在展開時換（記在 callers），畫面上的和次數一起在工具結束時寫
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    const id = callers.toolStarted(e.skill, e.agentId)
+    const isUseSwitched = watchInUse()
+    let ran: Awaited<ReturnType<typeof next>> | undefined
+    try {
+      ran = await next(e)
+      return ran
+    } finally {
+      // 結果的字（模型讀到的）在 `text`；沒實測過形狀，對不到「已載入」時照算
+      const ended = callers.toolEnded(id, ran?.text)
+      const name = ran !== undefined && ran.deny === undefined ? ended : undefined
+      const isUseChanged = isUseSwitched()
+      if (name !== undefined || isUseChanged) later(() => countSkillCall($, name, isUseChanged))
+    }
+  }).catch(($, e, next) => next(e))
+  // 展開：在 Skill 工具裡的等工具結束再算；緊接手打 `/name` 的現在算；兩者皆非是預載，不算。
+  // 不是預載的換成叫用者正在用的（fork skill 不標，規則在 skillCalls.ts）
+  on('skill.prompt', async ($, e, next) => {
+    const isUseSwitched = watchInUse()
+    // 型別上一定有 frontmatter，但舊的呼叫端可能沒帶：沒有就當作不是 fork
+    const how = callers.expanded(e.skill, (e.frontmatter as Record<string, unknown> | undefined)?.context === 'fork')
+    const isUseChanged = isUseSwitched()
+    if (how === 'typed') later(() => countSkillCall($, e.skill, isUseChanged))
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // 任務來源二：TaskCreate / TaskUpdate（整個 session 共用一份，只收主對話的）
@@ -2710,6 +3204,40 @@ export const register: Register = (on, options) => {
   on('classic.SubagentStop', async ($, e, next) => {
     const ran = await next(e)
     snapshotLater($, e)
+    // 在等你：subagent 停了，它跳出的對話框也沒了（turn.complete 已拿掉時這裡不讀也不寫）
+    const stopped: WaitingEvent = { kind: 'moved', agentId: e.agent_id }
+    later(async () => writeAll(await waitingWrites($, stopped)))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 在等你：只在對話框真的要跳出來時才發（權限核准、AskUserQuestion、ExitPlanMode 都是），hook 立刻回來、不等你。
+  // 不掛無 matcher 的 tool.call／tool.check：結束看同一個 loop 的下一個 turn.step 或 turn.complete。
+  // subagent 的帶 agent_id：記下它的描述（[任務] 列上那個），狀態框寫「subagent「描述」等你核准」。
+  // auto 模式下分類器處理的 ask 會不會發這個事件沒實測
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const ran = await next(e)
+    const { tool_name: tool, tool_input: input, agent_id: agentId } = e
+    askedLater($, agentId, (now, label) => decisionOf(tool, input, now, agentId, label))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 在等你：MCP elicitation（MCP 伺服器要你填東西）也算等你決定，開始是 Elicitation、結束是 ElicitationResult。
+  // 未實測：照引擎的型別接（`mcp_server_name`、`message`、`elicitation_id`、`agent_id`）。
+  // 有 hook 自己回應掉、沒跳對話框時也會短暫記上，ElicitationResult 一來就拿掉
+  on('classic.Elicitation', async ($, e, next) => {
+    const ran = await next(e)
+    const { mcp_server_name: server, message, elicitation_id: elicitationId, agent_id: agentId } = e
+    askedLater($, agentId, (now, label) => elicitationOf(server, message, now, agentId, label, elicitationId))
+    return ran
+  }).catch(($, e, next) => next(e))
+  on('classic.ElicitationResult', async ($, e, next) => {
+    const ran = await next(e)
+    const answered: WaitingEvent = {
+      kind: 'answered',
+      agentId: e.agent_id,
+      ...(e.elicitation_id === undefined ? {} : { elicitationId: e.elicitation_id }),
+    }
+    later(async () => writeAll(await waitingWrites($, answered)))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -2754,7 +3282,7 @@ export const register: Register = (on, options) => {
     const accent = settings.accent
     // 外框要用的狀態一次讀完。外框不讀任務板，只讀它的完成數與總數（任務板只有 [任務] 讀）；
     // 5H 倒數會隨時間變，交給畫面那一側的 Client 自己走
-    const [now, counted, currentTab, currentModel, actualEffort, chosen, busy, usageNow, allPages, indicator] = await Promise.all([
+    const [now, counted, currentTab, currentModel, actualEffort, chosen, busy, usageNow, allPages, indicator, waitingNow] = await Promise.all([
       $.clock.now(),
       read($, progress),
       read($, tab),
@@ -2765,6 +3293,7 @@ export const register: Register = (on, options) => {
       read($, usage),
       read($, pages),
       shownIndicator($),
+      read($, waiting),
     ])
 
     // ── 分頁列：[任務] 的標籤帶著進度 ──
@@ -2854,6 +3383,19 @@ export const register: Register = (on, options) => {
       </Box>
     )
     const area = chipArea(usageNow, now, cols)
+    // 在等你：模型那一行下面多一行，等你決定是警告色、輪到你是暗色；沒有在等時不多這一行
+    // 窄的時候怎麼截（保留「● 等你…」與「另 N 個」，先拿掉工具內容、開始時間，再截 subagent 描述）由 waitingLine 決定
+    const waitingShown = waitingLine(waitingNow, cols)
+    const waitingRow = waitingShown && (
+      <Text
+        key="a-waiting"
+        color={waitingShown.tone === 'decide' ? INDICATOR_COLOR : undefined}
+        dimColor={waitingShown.tone === 'turn'}
+        wrap="truncate-end"
+      >
+        {waitingShown.text}
+      </Text>
+    )
     const stateBody = (
       <Box key="a-body" flexDirection="column">
         <Box key="a-chips" flexDirection={area.isOneLine ? 'row' : 'column'} gap={area.gap}>
@@ -2889,6 +3431,7 @@ export const register: Register = (on, options) => {
           {area.showHint && <Text dimColor>{USAGE_HINT}</Text>}
         </Box>
         {selects}
+        {waitingRow}
       </Box>
     )
 
@@ -2912,8 +3455,8 @@ export const register: Register = (on, options) => {
     const paged = footFor(true)
     const shape = layout(content.rows, {
       bodyRows: e.props.scroll.bodyRows,
-      // 用量的行數，加上模型與深度那一行
-      stateRows: area.rows + 1,
+      // 用量的行數，加上模型與深度那一行，有在等時再加在等你那一行
+      stateRows: area.rows + 1 + (waitingShown ? 1 : 0),
       isTabsOnBorder,
       isInline: e.props.placement === 'inline',
       inlineRows: settings.inlineRows,
@@ -2976,7 +3519,7 @@ export const register: Register = (on, options) => {
                 {...(c.width !== undefined ? { width: c.width } : {})}
                 {...(c.scope ? { hover: { scope: c.scope } } : {})}
               >
-                <Text dimColor>{l.mark}</Text>
+                {c.mark ?? <Text dimColor>{l.mark}</Text>}
                 {c.value}
                 {trailingOf(c.id, c.trailing, c.scope)}
               </Box>

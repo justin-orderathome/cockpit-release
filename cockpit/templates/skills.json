@@ -1,0 +1,54 @@
+{
+  "說明": [
+    "這個檔決定 cockpit 的 [SKILL] 怎麼分組與顯示。存檔後切到別的分頁再切回 [SKILL] 就生效。",
+    "這一段只是說明，cockpit 不讀；不需要可以整段刪掉。下面五個鍵都可以省略。",
+    "",
+    "groups：幫整組改名。鍵是組的 id（plugin 名稱、來源的 owner/repo、move 開的自訂組，或 my-skills、builtin-skills），值是顯示的組名。",
+    "  例：\"groups\": { \"mattpocock-skills\": \"mattpocock\", \"emilkowalski/skills\": \"emil\" }",
+    "",
+    "descriptions：自訂一句話的短說明，優先於自動翻譯。鍵是 skill 的完整名稱（填進輸入框的那個）。",
+    "  例：\"descriptions\": { \"mattpocock-skills:wayfinder\": \"大型工作的地圖\" }",
+    "",
+    "hidden：要藏起來的 skill（完整名稱）或整組（組的 id）。",
+    "  例：\"hidden\": [\"mattpocock-skills:teach\", \"builtin-skills\"]",
+    "",
+    "move：把 skill 移到指定的組。鍵是 skill 的完整名稱，結尾可以加一個 * 比對開頭相同的；值是組的 id，和現有的組同名就併進去，否則開一個自訂組。",
+    "  例：\"move\": { \"gitnexus-*\": \"gitnexus\", \"show-me\": \"emilkowalski/skills\", \"mattpocock-skills:grilling\": \"常用\" }",
+    "  完整名稱優先於 *；符合多個 * 時取最長的。單獨列在 hidden 的 skill 移到哪都照樣藏著，整組藏掉時移出去的會在新組出現。",
+    "",
+    "categories：把組歸進分類，[SKILL] 的搜尋列下方會出現一排分類分頁籤，一次看一個分類。鍵是分類名稱（就是顯示的名稱），值是組 id 的陣列（move 之後的 id，自訂組也行）。",
+    "  例：\"categories\": { \"專案\": [\"mattpocock-skills\"], \"介面\": [\"emilkowalski/skills\", \"impeccable\"], \"工具\": [\"gitnexus\", \"builtin-skills\"] }",
+    "  分類與分類裡的組都照寫的順序；沒寫到的組集中在最後的「未分類」。同一組寫在兩個分類時只算第一個，不存在的組 id 略過。hidden 不收分類名稱。"
+  ],
+  "groups": {
+    "mattpocock-skills": "mattpocock",
+    "emilkowalski/skills": "emilkowalski"
+  },
+  "move": {
+    "gitnexus-*": "gitnexus"
+  },
+  "categories": {
+    "專案": [
+      "mattpocock-skills",
+      "gitnexus",
+      "code-review",
+      "commit-commands",
+      "codex"
+    ],
+    "介面": [
+      "emilkowalski/skills",
+      "impeccable",
+      "frontend-design"
+    ],
+    "審查": [
+      "prism-audit",
+      "prism-guard"
+    ],
+    "其他": [
+      "humanlayer/skills",
+      "tt-a1i/archify",
+      "my-skills",
+      "builtin-skills"
+    ]
+  }
+}

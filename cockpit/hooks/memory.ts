@@ -7,6 +7,8 @@
  */
 import { backgroundSource } from './backgroundSource'
 import type { BackgroundSource } from './backgroundSource'
+import { NO_WAITING, marksOf } from './waiting'
+import type { WaitingMarks } from './waiting'
 
 export type Reload = 'start' | 'clear'
 
@@ -28,6 +30,11 @@ export type SessionMemory = {
    * （收到空的快照時連清單都不讀），重新載入時 `reset()`
    */
   readonly background: BackgroundSource
+  /**
+   * 在等你：哪些 loop 有等你決定、主對話是不是輪到你（`$.state` 那份的摘要）。`turn.step` 每一步都會跑，
+   * 先看它就知道要不要讀狀態。undefined 是還不知道（mod 重載後還沒對過 `$.state`），那時照讀
+   */
+  waiting: WaitingMarks | undefined
   /** 重新載入畫面的資料之前呼叫：session 開始全部忘掉；`/clear` 只忘掉畫面上的 */
   begin: (reason: Reload) => void
 }
@@ -41,6 +48,7 @@ export function sessionMemory(): SessionMemory {
     shownUsage: undefined,
     lastEffort: undefined,
     background: backgroundSource(),
+    waiting: undefined,
     begin: reason => {
       // 畫面上的跟著 $.state 清空了，記著的「上次寫的」不能再拿來省略寫入
       memory.hasFrontmatter = false
@@ -48,6 +56,8 @@ export function sessionMemory(): SessionMemory {
       memory.lastEffort = undefined
       // 背景清單跟著 $.state 清空了，之前確認過的不再算數
       memory.background.reset()
+      // 在等你跟著 $.state 清空了（開場時 register 也把它對成沒在等）
+      memory.waiting = marksOf(NO_WAITING)
       if (reason === 'clear') return
       delete memory.dirs.home
       delete memory.dirs.root

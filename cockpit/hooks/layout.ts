@@ -24,6 +24,8 @@ export type Cell<T> = {
   value: T
   /** 接在內容後面、只在停在這一格時才出現的東西（例如 skill 的「?」）；這一頁沒有說明欄時照常顯示 */
   trailing?: T
+  /** 換掉前面的定位符號（例如正在用的 skill 的「● 」）；要和定位符號一樣寬 */
+  mark?: T
 }
 
 /** 整行只有一樣東西的一行 */
@@ -241,6 +243,8 @@ export function gridRows<I, T>(
     cell: (item: I, labelWidth: number) => T
     /** 停在這一格時才出現的東西；寬度要算進 `labelWidth` */
     trailing?: (item: I) => T | undefined
+    /** 換掉定位符號的東西（一樣寬）；不給或 undefined 用定位符號 */
+    mark?: (item: I) => T | undefined
   },
 ): GridRow<T>[] {
   const mark = textWidth(GRID.mark)
@@ -253,6 +257,7 @@ export function gridRows<I, T>(
     columnWidth,
     cells: line.map(({ item, width: w, column }) => {
       const trailing = spec.trailing?.(item)
+      const own = spec.mark?.(item)
       return {
         id: spec.id(item),
         detail: spec.detail(item),
@@ -261,6 +266,7 @@ export function gridRows<I, T>(
         column,
         value: spec.cell(item, w - mark),
         ...(trailing === undefined ? {} : { trailing }),
+        ...(own === undefined ? {} : { mark: own }),
       }
     }),
   }))

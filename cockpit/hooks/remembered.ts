@@ -12,10 +12,16 @@ import type { Translations } from './translate'
  * - `skillCategory`：[SKILL] 選中的分類名稱，字串；不是字串當作沒選（看第一個分類）。
  * - `lastTab`：上次停在哪個分頁（[設定] 不記）。
  * - `translations`、`howtos`：模型產生的快取（`howtos` 的驗證在 `howto.ts`）。
+ * - `appliedTemplate`：套用過的範本項目（全域），字串清單，用 `storedList` 驗；常用 prompt 與 SKILL 覆寫共用，
+ *   識別怎麼寫在 `templates.ts`（`promptKey`、`skillKey`）。
+ *   [設定] 算「範本有 N 項新的」要讀，所以依 ADR 0002 有一個 atom：開場讀回，「套用範本」時先讀 store 最新的、存回後換上。
+ * - `skillCalls`：skill 的叫用紀錄（全域，開始記錄日與每個 skill 的次數、最後一次的日期），驗證與加一次在 `skillCalls.ts`。
  * - 更新用的 `seenVersion`、`reloadingAt`、`checkedAt`、`releasedVersion`、`downloadedVersion`、`notifiedVersion`：
  *   只有 `updater.ts` 讀寫，各鍵的意思寫在那裡。
  *
- * 只記這個 session 的（不在這裡）：路線圖裡票的收合、是否顯示已完成的 effort、搜尋字串、翻到第幾頁。
+ * 只記這個 session 的（不在這裡）：路線圖裡票的收合、是否顯示已完成的 effort、搜尋字串、翻到第幾頁、
+ * 在等你（`waiting`：等你決定的對話框與輪到你的開始時刻，見 `waiting.ts`）、
+ * 正在用的 skill（`skillInUse`：主對話與各 subagent 的，見 `skillCalls.ts`）。
  */
 
 /** 存起來的字串清單；形狀不對是 undefined（維持預設），混進別的型別的項目丟掉 */

@@ -79,6 +79,80 @@ function detailOf(text: string): string | undefined {
   return inline || undefined
 }
 
+/** 地圖 Decisions so far／Out of scope 裡的一行：開頭的連結指到哪、要點 */
+type Gist = { link: string; text: string }
+
+/** 地圖的要點：結案的決策票先找 Decisions so far（已定），再找 Out of scope（不做） */
+type Gists = { decided: Gist[]; dropped: Gist[] }
+
+/** Answer 第一段最多幾行 */
+const ANSWER_LINES = 5
+
+/** `[文字](連結)` 只留文字 */
+const unlink = (text: string) => text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+
+/**
+ * 地圖某一段裡每一行的開頭連結與要點：要點取連結之後第一個 `：` 或 `:` 後面的字，
+ * 沒有冒號就整行；去掉 `**`，連結只留文字，反引號照留。開頭不是連結的行不算。
+ */
+function gistsOf(map: string, heading: string): Gist[] {
+  return (section(map, heading) ?? '').split('\n').flatMap(line => {
+    const found = /^\s*(?:[-*+]\s+)?\[[^\]]*\]\(\s*<?([^)>\s]+)>?[^)]*\)/.exec(line)
+    if (found === null) return []
+    const rest = line.slice(found[0].length)
+    const colon = rest.search(/[：:]/)
+    const raw = colon < 0 ? line.replace(/^\s*[-*+]\s+/, '') : rest.slice(colon + 1)
+    const text = unlink(raw).replace(/\*\*/g, '').trim()
+    return text === '' ? [] : [{ link: found[1] ?? '', text }]
+  })
+}
+
+/** 地圖連結是不是指到這張票：跟「經手」一樣用路徑或結尾幾段（只有檔名也算）比，斜線方向、`./` 前綴都對得到 */
+const pointsTo = (link: string, path: string) => {
+  const rel = link.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
+  return rel !== '' && (rel === path || path.endsWith(`/${rel}`))
+}
+
+/**
+ * Answer 開頭那行是不是套話（誰在何時怎麼談定，沒有決策本身）：只有日期、以「…定案：」結尾，
+ * 或以日期開頭、只有一句（`2026-10-21 與作者談定（grilling，兩輪）。`）。日期後面還接著別句的
+ * （`2026-10-21 在這台機器實測。做法：…`）是內容，照留。
+ */
+const isPreamble = (line: string) =>
+  /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(line) ||
+  /定案\s*[：:]$/.test(line) ||
+  /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s[^。：:]*[。：:]?$/.test(line)
+
+/**
+ * `## Answer` 的第一段：跳過開頭的套話行（`isPreamble`），最多 5 行，超過時結尾寫「…」。
+ * 表格或清單照原文。
+ */
+function answerLead(text: string): string | undefined {
+  const lines = (section(text, 'Answer') ?? '').split('\n')
+  let at = lines.findIndex(l => l.trim() !== '')
+  if (at < 0) return undefined
+  const head = lines[at]?.trim() ?? ''
+  if (isPreamble(head)) at += 1
+  while (at < lines.length && lines[at]?.trim() === '') at += 1
+  const end = lines.findIndex((l, i) => i >= at && l.trim() === '')
+  const para = lines.slice(at, end < 0 ? undefined : end)
+  if (para.length === 0) return undefined
+  const kept = para.slice(0, ANSWER_LINES)
+  return para.length > ANSWER_LINES ? `${kept.join('\n')}…` : kept.join('\n')
+}
+
+/**
+ * 結案的決策票的說明區只放一則：地圖 Decisions so far 的要點（已定）、Out of scope 的要點（不做）、
+ * Answer 第一段、Question，依序取第一個有的。同一張票出現好幾行時取第一行。
+ */
+function closedDetail(path: string, text: string, gists: Gists): string | undefined {
+  const decided = gists.decided.find(g => pointsTo(g.link, path))
+  if (decided) return `已定：${decided.text}`
+  const dropped = gists.dropped.find(g => pointsTo(g.link, path))
+  if (dropped) return `不做：${dropped.text}`
+  return answerLead(text) ?? detailOf(text)
+}
+
 /** 第一個 `#` 標題，去掉 `01 —`、`01:` 這類編號前綴；沒有標題就用檔名 */
 function titleOf(text: string, file: string): string {
   const heading = /^#\s+(.+)$/m.exec(text)?.[1]?.trim()
@@ -101,21 +175,24 @@ function blockersOf(value: string): number[] {
   return [...value.matchAll(/(?<![#\d])\d{1,3}(?!\d)/g)].map(m => Number(m[0]))
 }
 
-function parseTicket(path: string, file: string, text: string): Parsed {
+function parseTicket(path: string, file: string, text: string, gists: Gists): Parsed {
   // 決策票的 `Type:` 在標頭區（第一個 `##` 之前），而且是四種類型之一；內文裡的 Type 不算
   const header = text.split(/^##\s/m)[0] ?? ''
   const type = (field(header, 'Type') ?? '').toLowerCase().split(/\s/)[0] ?? ''
   const status = (field(text, 'Status') ?? '').toLowerCase().split(/\s/)[0] ?? ''
   const boxes = [...text.matchAll(/^\s*[-*]\s+\[( |x|X)\]/gm)].map(m => m[1] !== ' ')
+  const kind: TicketKind = DECISION_TYPES.has(type) ? 'decision' : 'build'
+  const isDone = DONE_STATUSES.has(status) || (boxes.length > 0 && boxes.every(Boolean))
   return {
     number: /^(\d+)/.exec(file)?.[1] ?? '',
     path,
     title: titleOf(text, file),
-    kind: DECISION_TYPES.has(type) ? 'decision' : 'build',
+    kind,
     status,
-    isDone: DONE_STATUSES.has(status) || (boxes.length > 0 && boxes.every(Boolean)),
+    isDone,
     blockedBy: blockersOf(field(text, 'Blocked by') ?? ''),
-    detail: detailOf(text),
+    // 結案的決策票顯示決定了什麼；其餘照舊是 Question 或 What to build
+    detail: kind === 'decision' && isDone ? closedDetail(path, text, gists) : detailOf(text),
   }
 }
 
@@ -161,9 +238,14 @@ export function parseEffort(input: {
   root?: string
 }): Effort {
   const dir = `${input.root ?? ROADMAP_ROOT}/${input.name}`
+  // 地圖本來就讀了；沒有地圖時兩段都是空的，結案的決策票直接走 Answer 的退路
+  const gists: Gists = {
+    decided: gistsOf(input.map ?? '', 'Decisions so far'),
+    dropped: gistsOf(input.map ?? '', 'Out of scope'),
+  }
   const parsed = [...input.issues]
     .sort((a, b) => a.file.localeCompare(b.file))
-    .map(i => parseTicket(`${dir}/issues/${i.file}`, i.file, i.text))
+    .map(i => parseTicket(`${dir}/issues/${i.file}`, i.file, i.text, gists))
   const ofKind = (kind: TicketKind) => withStates(parsed.filter(t => t.kind === kind))
   const decisions = ofKind('decision')
   const builds = ofKind('build')

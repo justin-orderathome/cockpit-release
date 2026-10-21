@@ -437,6 +437,8 @@ export type TreeRow =
       use?: ModelUse
       /** 它開的背景工作還有幾個在跑（描述後面的「· 背景 N」）；沒有的不寫 */
       backgroundCount?: number
+      /** 它跳出對話框在等你決定時的狀態字樣（「等你核准」等）；沒在等的沒有 */
+      waiting?: string
       /** 滑鼠移上去時說明區的內容 */
       detail: string
     }
@@ -469,12 +471,19 @@ export function clockOf(ms: number): string {
 }
 
 /**
- * subagent 列的說明：`subagent「描述」 · 類型`、`完整 model id · 深度 · 狀態`、`prompt：開頭幾行`。
+ * subagent 列的說明：`subagent「描述」 · 類型`、`完整 model id · 深度 · 狀態`、進行中而且正在用 skill 時
+ * `用 <skill>`、`prompt：開頭幾行`。
  * 結束的狀態帶總耗時；進行中的寫派出的時刻（說明區是一般文字，不會每秒更新，耗時看列上那一欄）。
  */
-function agentDetail(g: Subagent, state: SubagentState, elapsedMs: number | undefined): string {
+function agentDetail(
+  g: Subagent,
+  state: SubagentState,
+  elapsedMs: number | undefined,
+  waiting: string | undefined,
+  skill?: string,
+): string {
   const head = g.type === undefined ? `subagent「${g.label}」` : `subagent「${g.label}」 · ${g.type}`
-  const status =
+  const usual =
     state === 'running'
       ? g.startedAt === undefined
         ? STATE_WORDS[state]
@@ -482,16 +491,28 @@ function agentDetail(g: Subagent, state: SubagentState, elapsedMs: number | unde
       : elapsedMs === undefined
         ? STATE_WORDS[state]
         : `${STATE_WORDS[state]} ${formatDuration(elapsedMs)}`
+  // 跳出對話框在等你決定時，狀態寫「等你核准」等
+  const status = waiting ?? usual
   const model = g.model === undefined ? [] : [g.model.model, ...(g.model.effort === undefined ? [] : [g.model.effort])]
-  return [head, [...model, status].join(' · '), ...(g.prompt ? [`prompt：${g.prompt}`] : [])].join('\n')
+  // 正在用的 skill 接在狀態後面、prompt 前面（prompt 長，說明區放不下時被裁的是它）
+  const using = skill !== undefined && state === 'running' ? [`用 ${skill}`] : []
+  return [head, [...model, status].join(' · '), ...using, ...(g.prompt ? [`prompt：${g.prompt}`] : [])].join('\n')
 }
 
 /**
  * 把任務攤平成要畫的行：主對話的清單，每個任務底下接著派出那一刻它正在做時派出的 subagent 列
  * （遞迴，最多三層）。派出時派出者沒有進行中的任務：主對話派的接在最後，subagent 派的接在派出者那一列底下。
  * `background` 是每個 subagent 還在跑的背景工作數（`runningByAgent`）：背景工作不放進任務板，畫面時才合起來。
+ * `waiting` 是在等你決定的 subagent → 狀態字樣（`waitingAgents`），同樣畫面時才合起來。
+ * `skills` 是每個 subagent 正在用的 skill（`SkillInUse.agents`），寫進它那一列的說明。
  */
-export function viewTasks(board: TaskBoard, now: number, background: ReadonlyMap<string, number> = new Map()): TaskView {
+export function viewTasks(
+  board: TaskBoard,
+  now: number,
+  background: ReadonlyMap<string, number> = new Map(),
+  waiting: ReadonlyMap<string, string> = new Map(),
+  skills: Readonly<Record<string, string>> = {},
+): TaskView {
   const { tasks, agents } = board
   const knownIds = new Set(tasks.map(t => t.id))
   const shownTaskIds = new Set(tasks.filter(isShown).map(t => t.id))
@@ -521,6 +542,8 @@ export function viewTasks(board: TaskBoard, now: number, background: ReadonlyMap
     const state = stateOf(g)
     const elapsedMs = g.startedAt === undefined ? undefined : Math.max(0, (g.endedAt ?? now) - g.startedAt)
     const backgroundCount = background.get(g.id)
+    // 還在跑的才算在等（結束了，對話框也跟著沒了）
+    const waitingWord = state === 'running' ? waiting.get(g.id) : undefined
     const header: TreeRow = {
       kind: 'agent',
       id: `agent-${g.id}`,
@@ -534,7 +557,8 @@ export function viewTasks(board: TaskBoard, now: number, background: ReadonlyMap
       elapsedMs,
       use: g.model,
       ...(backgroundCount === undefined ? {} : { backgroundCount }),
-      detail: agentDetail(g, state, elapsedMs),
+      ...(waitingWord === undefined ? {} : { waiting: waitingWord }),
+      detail: agentDetail(g, state, elapsedMs, waitingWord, Object.hasOwn(skills, g.id) ? skills[g.id] : undefined),
     }
     // 它派出時沒有進行中任務的子 subagent，接在它自己的清單後面
     const loose = shownAgents.filter(c => c.parentAgentId === g.id && isLoose(c)).flatMap(c => agentRows(c, depth + 1))
@@ -621,10 +645,13 @@ export const AGENT_LOOKS: Record<SubagentState, { icon: '●' | '✓' | '✗'; c
   failed: { icon: '✗', color: 'error' },
 }
 
+/** 在等你決定的 subagent 列：警告色的 ? */
+export const WAITING_LOOK = { icon: '?', color: 'warning' } as const
+
 /** subagent 列要畫的字：狀態圖示與顏色、名稱（有清單時帶 done/total）、補到欄寬的耗時。沒有進度條與百分比 */
 export type AgentCells = {
-  icon: '●' | '✓' | '✗'
-  color: 'accent' | 'success' | 'error'
+  icon: '●' | '✓' | '✗' | '?'
+  color: 'accent' | 'success' | 'error' | 'warning'
   title: string
   /** 描述後面的暗色「· 背景 N」：它開的背景工作還有在跑的才有 */
   background?: string
@@ -654,7 +681,7 @@ export const agentTime = (elapsedMs: number | undefined): string =>
 
 export function agentCells(row: Extract<TreeRow, { kind: 'agent' }>, width: number): AgentCells {
   return {
-    ...AGENT_LOOKS[row.state],
+    ...(row.waiting === undefined ? AGENT_LOOKS[row.state] : WAITING_LOOK),
     title: row.total > 0 ? `${row.label} ${row.doneCount}/${row.total}` : row.label,
     ...(row.backgroundCount === undefined ? {} : { background: `· 背景 ${row.backgroundCount}` }),
     time: agentTime(row.elapsedMs),
