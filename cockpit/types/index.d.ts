@@ -58,10 +58,8 @@ export type TaskBoard = {
   tasks: TaskItem[]
   /** 派出過的 subagent，依第一次派出的順序 */
   agents: Subagent[]
-  /** 是否自動翻到最近開始的進行中任務 */
+  /** 是否在「任務」子分頁裡自動翻到最近開始的進行中任務（不會替使用者換子分頁） */
   isFollowing: boolean
-  /** 使用者正在看路線圖（按了「重新載入路線圖」或展開 effort）：任務有變化也不恢復自動跟隨 */
-  isHeld: boolean
   /** 主對話最近一次 `turn.step` 的模型與深度：模型標示「跟主對話比」的基準 */
   mainModel?: ModelUse
   /** 還沒派出（`agent.spawn` 還沒寫進來）就先到的 subagent 最近一步的模型與深度：派出時補上 */
@@ -69,6 +67,76 @@ export type TaskBoard = {
 }
 
 export type Tab = 'tasks' | 'basic' | 'skill' | 'settings'
+
+/** [任務] 裡的子分頁 */
+export type Subtab = 'roadmap' | 'tasks' | 'background'
+
+/**
+ * 背景工作的種類。加一種：在這裡加一個字串，`hooks/background.ts` 的 `KIND_LABELS` 會要你補它的名稱
+ * （`Record<BackgroundKind, …>`，少了 tsc 會報錯）。
+ */
+export type BackgroundKind = 'shell' | 'monitor' | 'workflow' | 'mcp' | 'cron' | 'wakeup'
+
+/**
+ * 背景工作的狀態：執行中、排程中，其餘都算已結束（完成、失敗、被停掉、已觸發、已到期、結果不明）。
+ * 加一種：在這裡加，`hooks/background.ts` 的 `STATUS_LOOKS` 會要你補它在哪一段、圖示、顏色與說明的字。
+ */
+export type BackgroundStatus = 'running' | 'scheduled' | 'completed' | 'failed' | 'stopped' | 'fired' | 'expired' | 'unknown'
+
+/** 誰開的：主對話、某個 subagent，或不知道（只從快照補到的） */
+export type BackgroundOwner = { kind: 'main' } | { kind: 'agent'; agentId: string } | { kind: 'unknown' }
+
+/** 「背景」子分頁的一筆背景工作 */
+export type BackgroundWork = {
+  /** 引擎給的 id（shell 的 `backgroundTaskId`、Monitor 的 `taskId`…）；結束通知的 `<task-id>` 對回這個 */
+  id: string
+  kind: BackgroundKind
+  /** 列上顯示的名稱：shell 是指令（一行），其他是描述或名稱 */
+  label: string
+  /** 說明區第一行「」裡的描述；沒有就用 `label` */
+  description?: string
+  /** 說明區第二行：完整指令或排程規則 */
+  command: string
+  status: BackgroundStatus
+  /** 開始的時刻（epoch ms）；只從快照補到的不知道 */
+  startedAt?: number
+  /** 結束的時刻（epoch ms）；還沒結束的沒有 */
+  endedAt?: number
+  /** 結束時刻是估的（在快照裡發現不見了）：耗時前面加 `~` */
+  isEndEstimated?: boolean
+  /** 失敗時的 exit code（從通知的 summary 取） */
+  exitCode?: number
+  owner: BackgroundOwner
+  /** Monitor 的逾時長度（ms，從開始算）；剩餘時間由畫面那一側走。persistent 的沒有 */
+  timeoutMs?: number
+  /** Monitor 沒有逾時（persistent）：時間前面寫「持續」 */
+  isPersistent?: boolean
+  /** 使用者按 × 或 c 隱藏 */
+  isDismissed: boolean
+  /** 排程（CronCreate、`/loop`）：cron 字串（5 欄、本地時間） */
+  cron?: string
+  /** 排程：重複的（一次性的是 false） */
+  recurring?: boolean
+  /** 排程：下次觸發的時刻（epoch ms） */
+  nextFireAt?: number
+  /** 排程：下次時刻是 cockpit 從 cron 字串自己算的（CronList 不能用時）：前面加「約」 */
+  isNextEstimated?: boolean
+  /** 排程：上次觸發的時刻（重複的才有；一次性的觸發後就結束，看 `endedAt`） */
+  lastFiredAt?: number
+  /**
+   * ScheduleWakeup（`/loop` 動態模式）的預定時刻：結果只有這個、沒有 id（未實測，照型別）。
+   * 排序與開頭的時刻照樣看 `nextFireAt`（兩者相同）；過了這個時刻 5 分還沒觸發就算結果不明
+   */
+  scheduledFor?: number
+}
+
+/** 這個 session 的背景工作清單（放 `$.state`，mod 重載後還在） */
+export type BackgroundList = {
+  /** 依開始的順序 */
+  works: BackgroundWork[]
+  /** `$.tool.check({ tool: 'CronList' })` 的結果，同一個 session 記住：`allow` 才呼叫 CronList，其他自己算「約」 */
+  cronListAccess?: 'allow' | 'other'
+}
 
 /** 票的種類：地圖底下的決策票，或 /to-tickets 拆出來的實作票 */
 export type TicketKind = 'decision' | 'build'
@@ -220,7 +288,13 @@ declare module 'claude-code' {
       /** 每秒跳動一次，讓進行中任務的耗時重畫 */
       tick: number
       tab: Tab
-      /** 各分頁目前的頁碼（從 0 起） */
+      /** [任務] 正在看的子分頁（同一個 session 內記住，不存回 $.store） */
+      subtab: Subtab
+      /** 這個 session 的背景工作（「背景」子分頁），見 `hooks/background.ts` */
+      background: BackgroundList
+      /** 「背景」子分頁的「▸ 更早的 N 筆」攤開了沒（只記這個 session） */
+      backgroundOlderOpen: boolean
+      /** 各分頁目前的頁碼（從 0 起）；[任務] 的頁碼在換子分頁時回到 0 */
       pages: Record<Tab, number>
       prompts: PromptGroup[]
       hasProjectPrompts: boolean

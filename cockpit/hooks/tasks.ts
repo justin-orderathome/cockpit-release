@@ -70,7 +70,7 @@ function syncTodos(
 /** subagent 一輪結束的原因（`turn.complete` 的 `reason`） */
 export type EndReason = 'answer' | 'aborted' | 'error' | 'refusal'
 
-export const EMPTY_BOARD: TaskBoard = { tasks: [], agents: [], isFollowing: true, isHeld: false }
+export const EMPTY_BOARD: TaskBoard = { tasks: [], agents: [], isFollowing: true }
 
 /** 會改變任務的事：三種工具的呼叫、subagent 的派出與結束，以及使用者在面板上的操作。 */
 export type TaskEvent =
@@ -96,12 +96,8 @@ export type TaskEvent =
   | { kind: 'dismissAgent'; id: string }
   /** 隱藏所有已完成的任務，以及已結束（完成、被停掉、出錯）的 subagent 列與它底下的任務 */
   | { kind: 'clearCompleted' }
-  /** 使用者手動翻頁：停止自動跟隨，也不再算在看路線圖 */
+  /** 使用者在「任務」子分頁手動翻頁：停止自動跟隨，任務有變化時再恢復 */
   | { kind: 'unfollow' }
-  /** 使用者要看路線圖（按「重新載入路線圖」、展開 effort）：停止自動跟隨，任務有變化也不恢復 */
-  | { kind: 'hold' }
-  /** 不看路線圖了（收起 effort、切換分頁）：之後任務有變化就恢復自動跟隨 */
-  | { kind: 'release' }
 
 const isShown = (t: TaskItem) => !t.isDismissed
 
@@ -176,7 +172,7 @@ function newAgent(
 
 /**
  * 任務的所有變化都在這裡：回傳新的任務、subagent 列與跟隨狀態。
- * 任務有狀態變化時恢復自動跟隨；使用者正在看路線圖時（`isHeld`）不恢復，免得看票看到一半被拉走。
+ * 任務有狀態變化時恢復自動跟隨。跟隨只在「任務」子分頁裡翻頁，看路線圖時不會被拉走（不換子分頁）。
  */
 export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
   switch (event.kind) {
@@ -198,8 +194,8 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
         model: withModel(early, event.model),
         now: event.now,
       })
-      // 新派出的 subagent 跟任務有變化一樣恢復自動跟隨；在看路線圖時不拉走
-      return { ...board, agents: [...board.agents, row], earlySteps, isFollowing: !board.isHeld }
+      // 新派出的 subagent 跟任務有變化一樣恢復自動跟隨
+      return { ...board, agents: [...board.agents, row], earlySteps, isFollowing: true }
     }
     case 'step': {
       // 每一步都會來：模型與深度沒變就回傳同一份，不必重畫
@@ -239,8 +235,7 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
         ...board,
         tasks: syncTodos(board.tasks, event.todos, event.now, owner),
         agents,
-        isFollowing: !board.isHeld,
-        isHeld: board.isHeld,
+        isFollowing: true,
       }
     }
     case 'created': {
@@ -259,7 +254,7 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
         const renamed = parsed ? { ...t, title: parsed.title, estimateMs: parsed.estimateMs ?? t.estimateMs } : t
         return status !== undefined ? withStatus(renamed, status, event.now) : renamed
       })
-      return { ...board, tasks, isFollowing: (status !== undefined && !board.isHeld) || board.isFollowing }
+      return { ...board, tasks, isFollowing: status !== undefined || board.isFollowing }
     }
     case 'dismissTask':
       return { ...board, tasks: board.tasks.map(t => (t.id === event.id ? { ...t, isDismissed: true } : t)) }
@@ -270,16 +265,12 @@ export function applyTask(board: TaskBoard, event: TaskEvent): TaskBoard {
       return { ...cleared, tasks: cleared.tasks.map(t => (t.status === 'completed' ? { ...t, isDismissed: true } : t)) }
     }
     case 'unfollow':
-      return board.isFollowing || board.isHeld ? { ...board, isFollowing: false, isHeld: false } : board
-    case 'hold':
-      return board.isHeld && !board.isFollowing ? board : { ...board, isFollowing: false, isHeld: true }
-    case 'release':
-      return board.isHeld ? { ...board, isHeld: false } : board
+      return board.isFollowing ? { ...board, isFollowing: false } : board
   }
 }
 
 /**
- * 畫面上會隨時間變的字：標題列的「還需約」，以及每個任務列的百分比與時間。
+ * 畫面上會隨時間變的字：「任務」子分頁最上面的「還需約」，以及每個任務列的百分比與時間。
  * 每秒算一次，跟上一秒一樣就不必重畫（做了十分鐘以上的任務，時間只顯示到分鐘）。
  */
 export const timeStamp = (view: TaskView): string =>
@@ -418,7 +409,7 @@ export function advanceRow<R extends RowTiming>(row: R, ms: number): R {
   }
 }
 
-/** 標題列的「還需約」過了 `ms` 之後是多少：`rows` 是主清單還沒完成的列（和 `summarize` 一樣全都有預測才算） */
+/** 「還需約」過了 `ms` 之後是多少：`rows` 是主清單還沒完成的列（和 `summarize` 一樣全都有預測才算） */
 export function remainingAfter(rows: readonly RowTiming[], ms: number): number | undefined {
   const later = rows.map(r => advanceRow(r, ms))
   if (later.length === 0 || later.some(r => r.remainingMs === undefined)) return undefined
@@ -444,15 +435,17 @@ export type TreeRow =
       elapsedMs?: number
       /** 它最近一次的模型與深度（模型標示用）；不知道的沒有 */
       use?: ModelUse
+      /** 它開的背景工作還有幾個在跑（描述後面的「· 背景 N」）；沒有的不寫 */
+      backgroundCount?: number
       /** 滑鼠移上去時說明區的內容 */
       detail: string
     }
 
 export type TaskView = {
-  /** 主對話的任務摘要（標題列與分頁列的進度） */
+  /** 主對話的任務摘要（「還需約」與分頁列、子分頁籤的進度） */
   main: TaskSummary
   rows: TreeRow[]
-  /** 看得到的 subagent 列數（含巢狀的；主對話沒有任務時標題列寫「N 個 subagent」） */
+  /** 看得到的 subagent 列數（含巢狀的；主對話沒有任務時「任務」子分頁籤寫這個數） */
   agentCount: number
   /** 有沒有東西可以清：看得到的完成任務或已結束的 subagent 列 */
   hasCompleted: boolean
@@ -496,8 +489,9 @@ function agentDetail(g: Subagent, state: SubagentState, elapsedMs: number | unde
 /**
  * 把任務攤平成要畫的行：主對話的清單，每個任務底下接著派出那一刻它正在做時派出的 subagent 列
  * （遞迴，最多三層）。派出時派出者沒有進行中的任務：主對話派的接在最後，subagent 派的接在派出者那一列底下。
+ * `background` 是每個 subagent 還在跑的背景工作數（`runningByAgent`）：背景工作不放進任務板，畫面時才合起來。
  */
-export function viewTasks(board: TaskBoard, now: number): TaskView {
+export function viewTasks(board: TaskBoard, now: number, background: ReadonlyMap<string, number> = new Map()): TaskView {
   const { tasks, agents } = board
   const knownIds = new Set(tasks.map(t => t.id))
   const shownTaskIds = new Set(tasks.filter(isShown).map(t => t.id))
@@ -526,6 +520,7 @@ export function viewTasks(board: TaskBoard, now: number): TaskView {
     const group = { id: g.id, label: `${'  '.repeat(depth)}↳ ${g.label}` }
     const state = stateOf(g)
     const elapsedMs = g.startedAt === undefined ? undefined : Math.max(0, (g.endedAt ?? now) - g.startedAt)
+    const backgroundCount = background.get(g.id)
     const header: TreeRow = {
       kind: 'agent',
       id: `agent-${g.id}`,
@@ -538,6 +533,7 @@ export function viewTasks(board: TaskBoard, now: number): TaskView {
       state,
       elapsedMs,
       use: g.model,
+      ...(backgroundCount === undefined ? {} : { backgroundCount }),
       detail: agentDetail(g, state, elapsedMs),
     }
     // 它派出時沒有進行中任務的子 subagent，接在它自己的清單後面
@@ -630,6 +626,8 @@ export type AgentCells = {
   icon: '●' | '✓' | '✗'
   color: 'accent' | 'success' | 'error'
   title: string
+  /** 描述後面的暗色「· 背景 N」：它開的背景工作還有在跑的才有 */
+  background?: string
   time: string
   /** 已結束（完成、被停掉、出錯）：整列變暗 */
   isEnded: boolean
@@ -658,6 +656,7 @@ export function agentCells(row: Extract<TreeRow, { kind: 'agent' }>, width: numb
   return {
     ...AGENT_LOOKS[row.state],
     title: row.total > 0 ? `${row.label} ${row.doneCount}/${row.total}` : row.label,
+    ...(row.backgroundCount === undefined ? {} : { background: `· 背景 ${row.backgroundCount}` }),
     time: agentTime(row.elapsedMs),
     isEnded: isEnded(row),
     canDismiss: taskColumns(width).showX,

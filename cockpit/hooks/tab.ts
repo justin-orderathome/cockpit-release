@@ -39,4 +39,6 @@ export type TabContent = {
   emptyText?: string
   /** 要自動翻到的那一行 */
   followId?: string
+  /** 手動翻頁時停止自動跟隨（只有 [任務] 的「任務」子分頁） */
+  unfollowsOnTurn?: boolean
 }

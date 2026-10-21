@@ -1,5 +1,5 @@
 /**
- * 畫面那一側自己走的字（`Client` 的 surface module）：[任務] 每秒的耗時欄與「還需約」、用量的 5H 倒數。
+ * 畫面那一側自己走的字（`Client` 的 surface module）：[任務] 每秒的耗時欄與「還需約」、背景工作的經過時間與 Monitor 的剩餘時間、用量的 5H 倒數。
  *
  * plugin 這一側重繪時把那一刻的時間（`at`）與當時的數字放進 props；這裡從那一刻起每隔一段自己加，
  * 不寫 plugin 的狀態，所以不會引起整個面板重繪。plugin 再重繪、帶來新的 `at` 時，從新的數字接著走。
@@ -8,6 +8,7 @@
  */
 import type { ClientSurface, RenderElement } from 'claude-code'
 
+import { backgroundTime, monitorLeft } from './background'
 import { advanceRow, agentTime, formatDuration, remainingAfter, taskCells } from './tasks'
 import type { RowTiming } from './tasks'
 import { countdown } from './usage'
@@ -15,9 +16,11 @@ import { countdown } from './usage'
 export type TickingProps =
   /** 進行中任務列的進度條、百分比與時間；`width` 是這一列可用的寬度（已扣掉縮排） */
   | { kind: 'task'; at: number; row: RowTiming; width: number; gap: number; accent: string }
+  /** 「背景」子分頁執行中那一列的經過時間；有逾時的 Monitor 另帶剩餘時間，畫在前面（「剩 25m」） */
+  | { kind: 'background'; at: number; elapsedMs: number; remainingMs?: number }
   /** 進行中 subagent 列的耗時 */
   | { kind: 'agent'; at: number; elapsedMs: number }
-  /** 標題列的「 · 還需約 …」：主清單還沒完成的列 */
+  /** 「任務」子分頁最上面的「還需約 …」：主清單還沒完成的列 */
   | { kind: 'remaining'; at: number; rows: RowTiming[] }
   /** 5H 的重置倒數：進度條後面的「 2h10m」，補到 `width` 格 */
   | { kind: 'countdown'; at: number; resetsAt: string; width: number }
@@ -26,7 +29,7 @@ export type TickingProps =
 type Ticks = { at: number; count: number }
 
 /** 每種多久跳一次 */
-const EVERY: Record<TickingProps['kind'], number> = { task: 1000, agent: 1000, remaining: 1000, countdown: 60_000 }
+const EVERY: Record<TickingProps['kind'], number> = { task: 1000, agent: 1000, background: 1000, remaining: 1000, countdown: 60_000 }
 
 /** 每個實例的計時器是從哪個 props 的時間開始數的，與停掉它的方法 */
 const timers = new WeakMap<object, { at: number; cancel: () => void }>()
@@ -52,9 +55,19 @@ export default function Ticking(props: TickingProps, s: ClientSurface<Ticks>): R
   const { Box, Text } = s.elements
   const ms = sinceProps(s, props.at, EVERY[props.kind])
   if (props.kind === 'agent') return <Text dimColor>{agentTime(props.elapsedMs + ms)}</Text>
+  if (props.kind === 'background') {
+    const time = <Text dimColor>{backgroundTime(props.elapsedMs + ms)}</Text>
+    if (props.remainingMs === undefined) return time
+    return (
+      <Box flexDirection="row" gap={1}>
+        <Text dimColor>{monitorLeft(props.remainingMs - ms)}</Text>
+        {time}
+      </Box>
+    )
+  }
   if (props.kind === 'remaining') {
     const left = remainingAfter(props.rows, ms)
-    return <Text dimColor>{left === undefined ? '' : ` · 還需約 ${formatDuration(left)}`}</Text>
+    return <Text dimColor>{left === undefined ? '' : `還需約 ${formatDuration(left)}`}</Text>
   }
   if (props.kind === 'countdown') {
     const left = countdown(props.resetsAt, props.at + ms)

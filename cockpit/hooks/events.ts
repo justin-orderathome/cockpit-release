@@ -7,8 +7,11 @@ import type { RoadmapEvent } from './roadmap'
 /** 工具跑完的結果裡，面板看的兩欄 */
 type Ran = { deny?: unknown; isError?: boolean }
 
-/** 工具有沒有真的跑完而且成功：沒被擋下，也沒回報錯誤 */
-export const succeeded = (ran: Ran): boolean => ran.deny === undefined && ran.isError !== true
+/**
+ * 工具有沒有真的跑完而且成功：沒被擋下，也沒回報錯誤。是型別守衛：成立時 `ran.result` 縮成那個工具的結果
+ */
+export const succeeded = <R extends Ran>(ran: R): ran is Exclude<R, { deny: string } | { isError: true }> =>
+  ran.deny === undefined && ran.isError !== true
 
 /** 寫檔的工具：成功寫了哪個檔，由 roadmap 看要不要重讀 */
 export const wroteFile = (path: string, ran: Ran): RoadmapEvent => ({ kind: 'wrote', path, isOk: succeeded(ran) })

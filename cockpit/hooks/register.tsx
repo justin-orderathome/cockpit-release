@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type {
+  BackgroundList,
   CommandEntry,
   Effort,
   EffortLevel,
@@ -10,11 +11,22 @@ import type {
   SkillGroup,
   SkillItem,
   SkillOverrides,
+  Subtab,
   Tab,
   TaskBoard,
   Ticket,
   UsageSnapshot,
 } from '../types'
+import {
+  EMPTY_BACKGROUND,
+  applyBackground,
+  backgroundCells,
+  parseNotification,
+  runningByAgent,
+  shellStart,
+  viewBackground,
+} from './background'
+import type { SnapshotCron, SnapshotTask } from './background'
 import { NO_CHANGELOG, changelogIn } from './changelog'
 import { FIELDS, TABS, changedFields, parseSettings, rawValues, resetLabel } from './config'
 import type { Field, Settings } from './config'
@@ -39,6 +51,8 @@ import { SAMPLE_PROMPTS, parsePrompts, withProject } from './prompts'
 import { INDICATOR_MARK, STARTUP_CHECK_DELAY, SWITCH_NOW, indicatorFor, installedFrom, versionIn } from './release'
 import type { Indicator, Install } from './release'
 import { startTab, storedList, storedText, storedTranslations, toggled } from './remembered'
+import { cronCreatedSignal, monitorSignal, wakeupSignal, workflowSignal } from './backgroundSource'
+import type { BackgroundPorts, BackgroundSignal } from './backgroundSource'
 import { roadmapSource, viewRoadmap } from './roadmap'
 import type { RoadmapEvent } from './roadmap'
 import { changes, isSame } from './same'
@@ -71,6 +85,8 @@ import {
   withIgnoreLine,
 } from './switches'
 import type { Press, SwitchState } from './switches'
+import { DEFAULT_SUBTAB, RUNNING_MARK, shownSubtab, subtabBar } from './subtabs'
+import type { SubtabSources } from './subtabs'
 import { tutorialPath, tutorialState, writeTutorial } from './tutorial'
 import type { TutorialState, TutorialTarget } from './tutorial'
 import type { Elements, TabContent, TabContext } from './tab'
@@ -80,6 +96,7 @@ import {
   agentCells,
   agentLabels,
   formatDuration,
+  hasRunning,
   hasTaskTools,
   taskCells,
   timingOf,
@@ -101,8 +118,8 @@ import { USAGE_HINT, checkAlerts, chipArea, chipColor, chipParts, shortTokens } 
  * 3. 四個分頁：各是一個函式，回傳 `TabContent`（固定在頂端與底端的行，加上要分頁的行）。
  * 4. `register`：登記 hook，並畫外框（「狀態」框、分頁列、說明欄、翻頁鍵）。
  *
- * 不碰引擎的部分各有自己的檔案：行數與欄數的預算在 `layout.ts`，每一列顯示什麼在 `tasks.ts`
- * 與 `roadmap.ts`，任務板的一件事動到哪幾份狀態在 `board.ts`，路線圖何時重讀也在 `roadmap.ts`；讀寫檔案的方式在 `files.ts`，
+ * 不碰引擎的部分各有自己的檔案：行數與欄數的預算在 `layout.ts`，每一列顯示什麼在 `tasks.ts`、
+ * `roadmap.ts` 與 `background.ts`（背景工作），任務板的一件事動到哪幾份狀態在 `board.ts`，路線圖何時重讀也在 `roadmap.ts`；讀寫檔案的方式在 `files.ts`，
  * 跨 session 記住什麼在 `remembered.ts`，模組裡記著什麼、session 開始與 /clear 時忘掉哪些在 `memory.ts`，
  * 引擎的事件代表什麼在 `events.ts`；畫面那一側自己走的字（`Client`）在 `ticking.tsx`。
  */
@@ -128,6 +145,15 @@ const taskTools = atom({ plugin: 'cockpit', key: 'taskTools' } as const, true)
 // 任務板的完成數與總數：外框（分頁列的進度）只讀這個，任務板寫入時順便算、數字變了才寫
 const progress = atom({ plugin: 'cockpit', key: 'progress' } as const, { doneCount: 0, total: 0 } as Progress)
 const tab = atom({ plugin: 'cockpit', key: 'tab' } as const, 'tasks' as Tab)
+/** [任務] 正在看的子分頁：同一個 session 內記住（`$.state`），不存回 `$.store`，新的 session 從「任務」開始 */
+const subtab = atom({ plugin: 'cockpit', key: 'subtab' } as const, DEFAULT_SUBTAB as Subtab)
+/**
+ * 這個 session 的背景工作（「背景」子分頁）：放 `$.state`，mod 重載後還在；resume 與 /clear 隨 `$.state` 清空。
+ * 和任務板分開：背景工作的變化不必重算任務的時程。怎麼變由 `background.ts` 的 `applyBackground` 決定
+ */
+const background = atom({ plugin: 'cockpit', key: 'background' } as const, EMPTY_BACKGROUND as BackgroundList)
+/** 「背景」子分頁的「▸ 更早的 N 筆」攤開了沒：比照路線圖的收合，只記這個 session、重開回到收起 */
+const backgroundOlderOpen = atom({ plugin: 'cockpit', key: 'backgroundOlderOpen' } as const, false)
 const pages = atom(
   { plugin: 'cockpit', key: 'pages' } as const,
   { tasks: 0, basic: 0, skill: 0, settings: 0 } as Record<Tab, number>,
@@ -204,6 +230,11 @@ const HOWTO_SAVE_EVERY = 10
  */
 type Write = () => Promise<unknown>
 
+/** 按鈕丟出去的非同步動作：不等它，失敗時用 toast 說原因（`what` 是「無法…」） */
+function pressed($: EngineInterface, job: Promise<unknown>, what: string) {
+  void job.catch(err => $.ui.toast(`${what}：${reasonOf(err)}`))
+}
+
 /** 一起寫出去（沒有要寫的就什麼都不做） */
 async function writeAll(writes: readonly Write[]) {
   if (writes.length > 0) await Promise.all(writes.map(w => w()))
@@ -259,6 +290,7 @@ type Plan = {
   roadmap?: Of<typeof roadmap>
   handled?: Of<typeof handled>
   tab?: Of<typeof tab>
+  subtab?: Of<typeof subtab>
   taskTools?: Of<typeof taskTools>
 }
 
@@ -300,6 +332,7 @@ async function planWrites($: EngineInterface, plan: Plan): Promise<Write[]> {
     keep(plan.roadmap, () => read($, roadmap), v => () => update($, roadmap, () => v)),
     keep(plan.handled, () => read($, handled), v => () => update($, handled, () => v)),
     keep(plan.tab, () => read($, tab), v => () => update($, tab, () => v)),
+    keep(plan.subtab, () => read($, subtab), v => () => update($, subtab, () => v)),
     keep(plan.taskTools, () => read($, taskTools), v => () => update($, taskTools, () => v)),
   ])
   return writes.flat()
@@ -787,8 +820,22 @@ async function roadmapChanged($: EngineInterface, event: RoadmapEvent) {
  * mod 重新載入後它記的重來、畫面上的還在，所以照樣跟畫面上的比一次
  */
 async function showRoadmap($: EngineInterface, efforts: Effort[]) {
-  const writes = await Promise.all([planWrites($, { roadmap: efforts }), handledWrites($, { kind: 'closed', open: openTickets(efforts) })])
+  // 路線圖空了：選的子分頁不存在就一起寫回「任務」（規則在 subtabs）。路線圖還有東西時，這次變化不會讓任何子分頁消失
+  const back = efforts.length === 0 ? await backIfGone($, async () => ({ efforts, background: await read($, background) })) : {}
+  const writes = await Promise.all([planWrites($, { roadmap: efforts, ...back }), handledWrites($, { kind: 'closed', open: openTickets(efforts) })])
   await writeAll(writes.flat())
+}
+
+/**
+ * 變化後選的子分頁不存在了：一起寫回「任務」，之後那一頁再出現也不會自己切回去（Plan 的一部分）。
+ * 存在與否由 subtabs 決定，畫面用的是同一條規則。選的是「任務」（永遠存在）就不讀別的狀態：
+ * 例如前景指令讓路線圖重讀時不碰背景清單
+ */
+async function backIfGone($: EngineInterface, sources: () => Promise<SubtabSources>): Promise<Pick<Plan, 'subtab'>> {
+  const chosen = await read($, subtab)
+  if (chosen === DEFAULT_SUBTAB) return {}
+  const shown = shownSubtab(chosen, await sources())
+  return shown === chosen ? {} : { subtab: shown }
 }
 
 // ── 經手 ─────────────────────────────────────────────────
@@ -862,8 +909,8 @@ async function submitPrompt($: EngineInterface, text: string, label: string) {
  * 換頁要寫的先算好一起寫，畫面立刻換；之後載入的資料有變才再寫一次。
  */
 async function setTab($: EngineInterface, next: Tab) {
-  // 離開用法頁；換了分頁就不算在看路線圖了，之後任務有變化照常自動跟隨
-  const writes = await Promise.all([planWrites($, { tab: next }), howtoCloseWrites($), taskWrites($, { task: { kind: 'release' } })])
+  // 離開用法頁；[任務] 的子分頁不動，回來時停在上次看的那一個
+  const writes = await Promise.all([planWrites($, { tab: next }), howtoCloseWrites($)])
   await writeAll(writes.flat())
   if (next !== 'settings') await $.store.set('lastTab', next)
   if (next === 'tasks') await roadmapChanged($, { kind: 'open' })
@@ -1025,31 +1072,31 @@ async function howtoCloseWrites($: EngineInterface): Promise<Write[]> {
   return writes
 }
 
-/** 按「重新載入路線圖」：重讀，翻回第一頁（路線圖在最上面），並在看路線圖的期間不自動跟隨 */
+/** 按「重新載入路線圖」：重讀（只在「路線圖」子分頁有這個鍵，不動自動跟隨） */
 async function lookAtRoadmap($: EngineInterface) {
-  const top = (ps: Record<Tab, number>) => ({ ...ps, tasks: 0 })
-  if (changes(await read($, pages), top)) await update($, pages, top)
-  await dispatch($, { kind: 'hold' })
   await roadmapChanged($, { kind: 'open' })
 }
 
-/** 展開或收起 effort：展開時算在看票，不自動跟隨；一個都沒展開時恢復 */
+/** 展開或收起 effort，並存起來 */
 async function toggleEffort($: EngineInterface, name: string) {
-  // 展開的 effort 與跟隨狀態先算好一起寫，再存起來
   const open = toggled(await read($, openEfforts), name)
-  const follow = open.includes(name)
-    ? await taskWrites($, { task: { kind: 'hold' } })
-    : open.length === 0
-      ? await taskWrites($, { task: { kind: 'release' } })
-      : []
-  await writeAll([() => update($, openEfforts, list => toggled(list, name)), ...follow])
+  await update($, openEfforts, list => toggled(list, name))
   await $.store.set('openEfforts', open)
 }
 
-async function turnPage($: EngineInterface, current: Tab, to: number) {
+/** 翻頁；`unfollows` 是在「任務」子分頁翻的（停止自動跟隨，和翻頁一起寫） */
+async function turnPage($: EngineInterface, current: Tab, to: number, unfollows: boolean) {
   const turned = (ps: Record<Tab, number>) => ({ ...ps, [current]: Math.max(0, to) })
-  if (changes(await read($, pages), turned)) await update($, pages, turned)
-  if (current === 'tasks') await dispatch($, { kind: 'unfollow' })
+  const [shown, follow] = await Promise.all([read($, pages), unfollows ? taskWrites($, { task: { kind: 'unfollow' } }) : []])
+  await writeAll([...(changes(shown, turned) ? [() => update($, pages, turned)] : []), ...follow])
+}
+
+/** 換 [任務] 的子分頁：從新那一頁的第一頁看起；子分頁與頁碼一起寫，只重繪一次 */
+async function pickSubtab($: EngineInterface, next: Subtab) {
+  const [now, shown] = await Promise.all([read($, subtab), read($, pages)])
+  if (isSame(now, next)) return
+  const top = (ps: Record<Tab, number>) => ({ ...ps, tasks: 0 })
+  await writeAll([() => update($, subtab, () => next), ...(changes(shown, top) ? [() => update($, pages, top)] : [])])
 }
 
 // ── 任務 ─────────────────────────────────────────────────
@@ -1082,6 +1129,70 @@ async function taskWrites($: EngineInterface, step: BoardStep): Promise<Write[]>
   return boardWrites($, await boardState($), step)
 }
 
+// ── 背景工作 ─────────────────────────────────────────────
+// 什麼時候問引擎什麼、要套哪個事件都在 `backgroundSource.ts`；這裡只組 ports、照回答寫
+
+/** 背景來源問引擎用的：讀清單、時間、CronList 的權限與內容（寫入不在這裡） */
+function backgroundPorts($: EngineInterface): BackgroundPorts {
+  return {
+    list: () => read($, background),
+    now: () => $.clock.now(),
+    cronListAccess: async () => ((await $.tool.check({ tool: 'CronList', input: {} })).decision === 'allow' ? 'allow' : 'other'),
+    cronList: async () => {
+      try {
+        const ran = await $.tool.call({ tool: 'CronList' })
+        return succeeded(ran) ? ran.result.jobs : undefined
+      } catch (err) {
+        $.ui.log(`讀 CronList 失敗：${reasonOf(err)}`, { to: 'debug' })
+        return undefined
+      }
+    },
+  }
+}
+
+/**
+ * 一件背景工作的事：問背景來源要套什麼，沒變就不寫。看得到的全沒了、而選的子分頁因此不存在時，
+ * 子分頁一起寫回「任務」（同一批寫入，只重繪一次；規則在 subtabs）。寫入套在當下最新的清單上；事件自己帶著時刻，套幾次結果都一樣
+ */
+async function backgroundSignal($: EngineInterface, signal: BackgroundSignal) {
+  const step = await memory.background.next(signal, backgroundPorts($))
+  if (step === undefined) return
+  const { event, isEmpty } = step
+  const back = isEmpty ? await planWrites($, await backIfGone($, async () => ({ efforts: await read($, roadmap), background: EMPTY_BACKGROUND }))) : []
+  await writeAll([() => update($, background, l => applyBackground(l, event)), ...back])
+}
+
+/** 對話停下（`classic.Stop`／`classic.SubagentStop`）帶的快照：兩者的處理一樣 */
+type StopSnapshot = { session_id: string; background_tasks?: readonly SnapshotTask[]; session_crons?: readonly SnapshotCron[] }
+
+/** 對話停下（主對話或 subagent）：快照排到背景校正，hook 不必等它 */
+function snapshotLater($: EngineInterface, e: StopSnapshot) {
+  const signal: BackgroundSignal = { kind: 'snapshot', sessionId: e.session_id, tasks: e.background_tasks ?? [], ...(e.session_crons === undefined ? {} : { crons: e.session_crons }) }
+  later(() => backgroundSignal($, signal))
+}
+
+/**
+ * shell 指令（Bash、PowerShell）跑完：指令裡有票的路徑算經手（被擋下、根本沒跑的不算）；告訴路線圖跑了指令；
+ * 結果帶 `backgroundTaskId`（run_in_background、Ctrl+B、逾時轉背景）就加一筆背景工作。
+ * 沒有這個欄位的前景指令不多任何 host 呼叫
+ */
+function shellDone(
+  $: EngineInterface,
+  e: { command: string; description?: string; agentId?: string },
+  ran: ToolCallResult<'Bash'> | ToolCallResult<'PowerShell'>,
+) {
+  if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
+  void roadmapChanged($, ranShell(ran))
+  const bgId = succeeded(ran) ? ran.result.backgroundTaskId : undefined
+  if (bgId !== undefined) later(() => backgroundSignal($, { kind: 'started', work: shellStart(bgId, e.command, e.description, e.agentId) }))
+}
+
+/** 寫檔的工具（Write、Edit）跑完：改了票檔算經手；告訴路線圖寫了哪個檔（要不要重讀由它決定） */
+function fileWritten($: EngineInterface, e: { file_path: string; agentId?: string }, ran: { deny?: unknown; isError?: boolean }) {
+  if (succeeded(ran)) later(() => touchTickets($, e.file_path, e.agentId))
+  void roadmapChanged($, wroteFile(e.file_path, ran))
+}
+
 // ── 面板上的小開關：每個都寫明自己的 atom，沒變就不寫（寫了就重畫） ──
 
 async function showTutorialMenu($: EngineInterface, on: boolean) {
@@ -1100,6 +1211,11 @@ async function flipSwitchMode($: EngineInterface) {
 async function flipDoneEfforts($: EngineInterface) {
   const flip = (on: boolean) => !on
   if (changes(await read($, showDoneEfforts), flip)) await update($, showDoneEfforts, flip)
+}
+
+async function flipBackgroundOlder($: EngineInterface) {
+  const flip = (on: boolean) => !on
+  if (changes(await read($, backgroundOlderOpen), flip)) await update($, backgroundOlderOpen, flip)
 }
 
 async function foldRoadmap($: EngineInterface, id: string, isOpen: boolean) {
@@ -1127,7 +1243,9 @@ async function resetOptions($: EngineInterface) {
 // ══ 分頁：每個分頁只管自己有哪些行，外框與分頁由 register 統一處理 ══════════════
 
 /**
- * [任務] 分頁：上方是路線圖（每個 effort 一行，展開後看票），下方是待辦清單。
+ * [任務] 分頁：子分頁「路線圖」（每個 effort 一行，展開後看票）、「任務」（待辦清單與 subagent 列）
+ * 與「背景」（這個 session 的背景工作，依狀態分段），一次看一種。
+ * 哪幾個分頁籤要畫、各寫什麼由 `subtabs.ts` 決定。
  * 每一行顯示哪些字、多寬時留哪幾欄，由 `viewRoadmap` 與 `taskCells` 決定；這裡只負責畫與掛上動作。
  */
 async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, now: number): Promise<TabContent> {
@@ -1135,7 +1253,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
   // 會隨時間變的字畫成 Client，在畫面那一側自己走；沒有 Client 的介面畫成這一刻的樣子，下次重繪才更新
   const Client = 'Client' in ui ? ui.Client : undefined
   // 這個分頁要用的狀態一次讀完
-  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools] = await Promise.all([
+  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools, chosenSubtab, works, showOlder] = await Promise.all([
     read($, board),
     read($, roadmap),
     read($, showDoneEfforts),
@@ -1143,62 +1261,98 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     read($, roadmapFolds),
     read($, handled),
     read($, taskTools),
+    read($, subtab),
+    read($, background),
+    read($, backgroundOlderOpen),
   ])
-  const view = viewTasks(taskBoard, now)
+  // subagent 列的「· 背景 N」與背景說明區的「由 subagent「…」開」：兩份資料在這裡合起來，各自的狀態不互相塞
+  const view = viewTasks(taskBoard, now, runningByAgent(works))
+  const bg = viewBackground(works, now, { showOlder, agents: taskBoard.agents })
   const main = view.main
+  // 經手的票行尾標經手者的模型；路線圖整個算一塊，和 [任務] 清單分開決定完整或縮寫
+  const road = viewRoadmap(efforts, {
+    open: new Set(open),
+    showDone,
+    width: cols,
+    folds,
+    handled: handlerMarks(handledNow, taskBoard),
+    base: view.base,
+  })
 
-  // 數字是重點，後面的補充（還要多久）用暗色
-  const head = main.total === 0 ? '' : `${main.doneCount}/${main.total} 完成`
-  // 「還需約」只有主清單有進行中的任務時才會隨時間變；只剩等著的，數字不變，照一般文字畫
-  const isCounting =
-    main.total > 0 && main.doneCount < main.total && main.remainingMs !== undefined && main.rows.some(r => r.status === 'in_progress')
-  const headNote =
-    main.total === 0
-      ? view.agentCount > 0
-        ? `${view.agentCount} 個 subagent`
-        : '目前沒有任務'
-      : main.doneCount === main.total
-        ? ' · 全部完成'
-        : main.remainingMs !== undefined
-          ? ` · 還需約 ${formatDuration(main.remainingMs)}`
-          : ''
-  const headLine = (
-    <Box key="tasks-head" flexDirection="row" gap={2}>
-      {isCounting && Client ? (
-        // 「還需約」每秒走：交給 Client，數字照主清單還沒完成的列往後推
-        <Box flexGrow={1} flexShrink={1} flexDirection="row" overflow="hidden">
-          <Text bold>{head}</Text>
+  // ── 子分頁籤：哪些存在、各寫什麼、實際看哪一個，都由 subtabs 決定 ──
+  const bar = subtabBar(
+    chosenSubtab,
+    { efforts, background: works },
+    { tasks: { main, agentCount: view.agentCount, isRunning: hasRunning(taskBoard) }, roadmap: road, background: bg },
+    cols,
+  )
+  const isTasks = bar.shown === 'tasks'
+  const isRoadmap = bar.shown === 'roadmap'
+  const isBackground = bar.shown === 'background'
+  const subtabLine = bar.segments && (
+    <Box key="subtabs" flexDirection="row">
+      {bar.segments.map(s =>
+        s.kind === 'sep' ? (
+          <Text key={`subtab-sep-${s.id}`} dimColor>
+            {' │ '}
+          </Text>
+        ) : s.kind === 'current' ? (
+          <Box key={`subtab-${s.id}`} flexDirection="row">
+            <Text bold color={accent}>
+              {s.label}
+            </Text>
+            {s.count !== undefined && <Text color={accent}>{` ${s.count}`}</Text>}
+            {s.isRunning && <Text color={accent}>{` ${RUNNING_MARK}`}</Text>}
+          </Box>
+        ) : (
+          <Button key={`subtab-${s.id}`} label={s.text} plain hotkey={s.hotkey} onPress={() => pressed($, pickSubtab($, s.id), '無法切換子分頁')}>
+            <Text>{s.label}</Text>
+            {s.count !== undefined && <Text dimColor>{` ${s.count}`}</Text>}
+            {s.isRunning && <Text color={accent}>{` ${RUNNING_MARK}`}</Text>}
+          </Button>
+        ),
+      )}
+    </Box>
+  )
+
+  // 「任務」子分頁最上面只留「還需約」（有預估時才有）；進度與 subagent 數看分頁籤
+  const remainingMs = main.total > 0 && main.doneCount < main.total ? main.remainingMs : undefined
+  // 只有主清單有進行中的任務時才會隨時間變；只剩等著的，數字不變，照一般文字畫
+  const isCounting = remainingMs !== undefined && main.rows.some(r => r.status === 'in_progress')
+  const remainingLine =
+    isTasks && remainingMs !== undefined ? (
+      <Box key="tasks-head" flexDirection="row" overflow="hidden">
+        {isCounting && Client ? (
+          // 每秒走：交給 Client，數字照主清單還沒完成的列往後推
           <Client
             key="tasks-remaining"
             module="./ticking.tsx"
             props={{ kind: 'remaining', at: now, rows: main.rows.filter(r => r.status !== 'completed').map(timingOf) }}
           />
-        </Box>
-      ) : (
-        <Box flexGrow={1} flexShrink={1}>
-          <Text wrap="truncate-end">
-            <Text bold>{head}</Text>
-            <Text dimColor>{headNote}</Text>
-          </Text>
-        </Box>
-      )}
-    </Box>
-  )
-  // 沒有任務工具時，模型寫不出清單：標題下多一行告訴使用者怎麼打開
-  const top = hasTools ? (
-    headLine
-  ) : (
-    <Box key="tasks-top" flexDirection="column">
-      {headLine}
+        ) : (
+          <Text dimColor wrap="truncate-end">{`還需約 ${formatDuration(remainingMs)}`}</Text>
+        )}
+      </Box>
+    ) : undefined
+  // 沒有任務工具時，模型寫不出清單：「任務」子分頁多一行告訴使用者怎麼打開
+  const hint =
+    isTasks && !hasTools ? (
       <Text key="no-task-tools" color="warning" wrap="truncate-end">
         {NO_TASK_TOOLS_HINT}
       </Text>
-    </Box>
-  )
+    ) : undefined
+  const topLines = [subtabLine, remainingLine, hint].filter((l): l is JSX.Element => Boolean(l))
+  const top =
+    topLines.length === 0 ? undefined : (
+      <Box key="tasks-top" flexDirection="column">
+        {topLines}
+      </Box>
+    )
   // ── 待辦清單：只有進行中的畫進度條與百分比，其餘整列暗色 ──
   // 模型標示整塊一起決定完整或縮寫
   const labels = agentLabels(view, cols)
-  const todoRows: Row<JSX.Element>[] = view.rows.map(r => {
+  // 三個子分頁的列只建正在看的那一頁（其他頁的 view 仍要算：分頁籤的數字用得到）
+  const todoRows: Row<JSX.Element>[] = (isTasks ? view.rows : []).map(r => {
     const indent = r.depth * 2
     if (r.kind === 'agent') {
       // subagent 列：狀態圖示、描述（有清單時帶 done/total）、模型標示、耗時；結束的整列變暗
@@ -1217,10 +1371,17 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             >
               {cells.icon}
             </Text>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text dimColor={cells.isEnded} wrap="truncate-end">
-                {cells.title}
-              </Text>
+            <Box flexGrow={1} flexShrink={1} flexDirection="row">
+              <Box flexShrink={1}>
+                <Text dimColor={cells.isEnded} wrap="truncate-end">
+                  {cells.title}
+                </Text>
+              </Box>
+              {cells.background !== undefined && (
+                <Box flexShrink={0}>
+                  <Text dimColor>{` ${cells.background}`}</Text>
+                </Box>
+              )}
             </Box>
             {label !== undefined && <Text dimColor={cells.isEnded}>{label}</Text>}
             {r.state === 'running' && r.elapsedMs !== undefined && Client ? (
@@ -1292,16 +1453,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     }
   })
 
-  // ── 路線圖：放在待辦清單上方 ──
-  // 經手的票行尾標經手者的模型；路線圖整個算一塊，和 [任務] 清單分開決定完整或縮寫
-  const road = viewRoadmap(efforts, {
-    open: new Set(open),
-    showDone,
-    width: cols,
-    folds,
-    handled: handlerMarks(handledNow, taskBoard),
-    base: view.base,
-  })
+  // ── 路線圖子分頁：每個 effort 一行，展開後看票 ──
   const ticketIcon = (t: Ticket) =>
     t.state === 'done' ? (
       <Text color="success">✓</Text>
@@ -1312,29 +1464,13 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     ) : (
       <Text dimColor>○</Text>
     )
-  const roadmapGroup = { id: 'roadmap', label: '路線圖' }
-  const roadmapRows: Row<JSX.Element>[] =
-    efforts.length === 0
-      ? []
-      : [
-          {
-            id: 'roadmap-header',
-            group: roadmapGroup,
-            isHeader: true,
-            value: (
-              <Text bold wrap="truncate-end">
-                路線圖
-              </Text>
-            ),
-          },
-          ...road.rows.map((r): Row<JSX.Element> => {
+  const roadmapRows: Row<JSX.Element>[] = (isRoadmap ? road.rows : []).map((r): Row<JSX.Element> => {
             const f = r.effort
             // 展開後的行算在這個 effort 的組裡，跨頁時「（續）」才看得出是哪一個
             const effortGroup = { id: `effort/${f.name}`, label: `路線圖：${f.name}` }
             if (r.kind === 'effort') {
               return {
                 id: `effort/${f.name}`,
-                group: roadmapGroup,
                 value: (
                   <Box flexDirection="row" gap={ROW_GAP}>
                     <Box flexGrow={1} flexShrink={1}>
@@ -1407,23 +1543,96 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
                 </Box>
               ),
             }
-          }),
-        ]
+          })
 
-  // 分頁的操作疊在下框線上，和其他分頁同一個位置；路線圖的兩個也在這裡，
-  // 不放在「路線圖」那一行：自動翻到進行中的任務時，那一行常常不在這一頁
-  const hasRoadmap = efforts.length > 0
+  // ── 背景子分頁：依狀態分段（執行中、排程、已結束），段標題比照組名；每一列圖示、名稱、種類、時間、× ──
+  const backgroundRows: Row<JSX.Element>[] = (isBackground ? bg.rows : []).map((r): Row<JSX.Element> => {
+    if (r.kind === 'section') {
+      return {
+        id: r.id,
+        group: { id: `background/${r.section}`, label: r.label },
+        isHeader: true,
+        value: (
+          <Box key={r.id} flexDirection="row">
+            <Text bold>{r.label}</Text>
+            <Text dimColor>{` ${r.count}`}</Text>
+          </Box>
+        ),
+      }
+    }
+    if (r.kind === 'older') {
+      // 「▸ 更早的 N 筆」：比照路線圖的「▸ 已結案 N」，點了攤開或收起
+      return {
+        id: r.id,
+        group: r.group,
+        value: <Button key="fold-background-older" label={r.text} plain dimColor onPress={() => pressed($, flipBackgroundOlder($), '無法攤開更早的')} />,
+      }
+    }
+    const w = r.work
+    const cells = backgroundCells(r, cols)
+    // 名稱與時間的色調：完成的變暗，失敗與被停掉的紅色
+    const tone = cells.tone === 'error' ? { color: 'error' } : { dimColor: cells.tone === 'dim' }
+    // 有畫剩餘時間、而且它會往下走（有逾時的 Monitor）
+    const leftTicks = cells.left !== undefined && r.remainingMs !== undefined
+    return {
+      id: r.id,
+      group: r.group,
+      detail: r.detail,
+      value: (
+        <Box key={`background-row-${w.id}`} flexDirection="row" gap={ROW_GAP}>
+          {cells.at !== undefined && <Text color="cyan">{cells.at}</Text>}
+          {cells.icon !== '' && (
+            <Text color={cells.color === 'accent' ? accent : cells.color} dimColor={cells.color === undefined || cells.tone === 'dim'}>
+              {cells.icon}
+            </Text>
+          )}
+          <Box flexGrow={1} flexShrink={1}>
+            <Text wrap="truncate-end" {...tone}>
+              {cells.title}
+            </Text>
+          </Box>
+          {cells.kind !== undefined && <Text dimColor>{cells.kind}</Text>}
+          {/* Monitor 的「剩 25m」也交給 Client 往下走；「持續」與沒有 Client 時畫成固定的字 */}
+          {cells.left !== undefined && !(leftTicks && cells.isTicking && Client) && <Text dimColor>{cells.left}</Text>}
+          {cells.isTicking && Client ? (
+            // 經過時間每秒走：交給 Client，plugin 這一側沒有計時器
+            <Client
+              key={`background-time-${w.id}`}
+              module="./ticking.tsx"
+              props={{ kind: 'background', at: now, elapsedMs: r.elapsedMs ?? 0, ...(leftTicks ? { remainingMs: r.remainingMs } : {}) }}
+            />
+          ) : (
+            <Text {...(cells.tone === 'error' ? tone : { dimColor: true })}>{cells.time}</Text>
+          )}
+          {cells.canDismiss && (
+            <Button
+              key={`dismiss-background-${w.id}`}
+              label="×"
+              plain
+              dimColor
+              onPress={() => pressed($, backgroundSignal($, { kind: 'changed', event: { kind: 'dismiss', id: w.id } }), '無法隱藏這一列')}
+            />
+          )}
+        </Box>
+      ),
+    }
+  })
+
+  // 分頁的操作疊在下框線上，跟著子分頁換：路線圖 d、r；任務 c；背景 c（只清背景）
   const doneLabel = showDone ? '隱藏已完成 effort' : `已完成 effort ${road.doneCount}`
-  const showsDoneToggle = hasRoadmap && road.doneCount > 0
+  const showsDoneToggle = isRoadmap && road.doneCount > 0
+  const showsClear = isTasks && view.hasCompleted
+  const showsClearBackground = isBackground && bg.hasEnded
   const actionPieces = [
-    ...(view.hasCompleted ? [{ hotkey: 'c', label: '清除已完成' }] : []),
+    ...(showsClear ? [{ hotkey: 'c', label: '清除已完成' }] : []),
+    ...(showsClearBackground ? [{ hotkey: 'c', label: '清除已結束' }] : []),
     ...(showsDoneToggle ? [{ hotkey: 'd', label: doneLabel }] : []),
-    ...(hasRoadmap ? [{ hotkey: 'r', label: '重新載入路線圖' }] : []),
+    ...(isRoadmap ? [{ hotkey: 'r', label: '重新載入路線圖' }] : []),
   ]
   const actions =
     actionPieces.length === 0 ? undefined : (
       <Box key="tasks-actions" flexDirection="row" gap={2}>
-        {view.hasCompleted && (
+        {showsClear && (
           <Button
             key="clear-done"
             label="清除已完成"
@@ -1431,6 +1640,16 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             dimColor
             hotkey="c"
             onPress={() => void dispatch($, { kind: 'clearCompleted' })}
+          />
+        )}
+        {showsClearBackground && (
+          <Button
+            key="clear-ended-background"
+            label="清除已結束"
+            plain
+            dimColor
+            hotkey="c"
+            onPress={() => pressed($, backgroundSignal($, { kind: 'changed', event: { kind: 'clearEnded' } }), '無法清除已結束')}
           />
         )}
         {showsDoneToggle && (
@@ -1443,7 +1662,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             onPress={() => void flipDoneEfforts($)}
           />
         )}
-        {hasRoadmap && (
+        {isRoadmap && (
           <Button
             key="reload-roadmap"
             label="重新載入路線圖"
@@ -1457,33 +1676,13 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     )
   const actionsWidth = footWidth(actionPieces)
 
-  // 有路線圖時，待辦清單前面加一行組名，跨頁時才看得出「（續）」是哪一組
-  const todoGroup = { id: 'todos', label: '待辦' }
-  const rows: Row<JSX.Element>[] =
-    roadmapRows.length > 0 && todoRows.length > 0
-      ? [
-          ...roadmapRows,
-          {
-            id: 'todos-header',
-            group: todoGroup,
-            isHeader: true,
-            value: (
-              <Text bold wrap="truncate-end">
-                待辦
-              </Text>
-            ),
-          },
-          ...todoRows.map(r => ({ ...r, group: r.group ?? todoGroup })),
-        ]
-      : [...roadmapRows, ...todoRows]
-
   return {
-    top,
-    ...(hasTools ? {} : { topRows: 2 }),
+    ...(top === undefined ? {} : { top, topRows: topLines.length }),
     ...(actions === undefined ? {} : { actions, actionsWidth }),
-    rows,
-    emptyText: '模型使用待辦清單後，任務會顯示在這裡。',
-    followId: view.followId,
+    rows: isTasks ? todoRows : isRoadmap ? roadmapRows : backgroundRows,
+    emptyText: isTasks ? '模型使用待辦清單後，任務會顯示在這裡。' : isRoadmap ? '沒有進行中的 effort。' : '沒有背景工作。',
+    // 自動跟隨只在「任務」子分頁裡翻頁，永遠不換子分頁
+    ...(isTasks ? { followId: view.followId, unfollowsOnTurn: true } : {}),
   }
 }
 
@@ -2407,6 +2606,11 @@ export const register: Register = (on, options) => {
   // subagent 回報的通知不算：它的回報常寫著票的路徑，但做的不是主對話
   on('prompt.submit', async ($, e, next) => {
     const ran = await next(e)
+    // 背景工作的結束通知：先看文字本身（沒有 <status> 的 Monitor 每行輸出不做任何事），有才排到背景
+    const note = e.origin.kind === 'task-notification' ? parseNotification(e.text) : undefined
+    if (note !== undefined) later(() => backgroundSignal($, { kind: 'notified', note }))
+    // 排程觸發：讀 CronList 看是哪一個（清單裡沒有排程就什麼都不做）
+    if (e.origin.kind === 'scheduled-trigger') later(() => backgroundSignal($, { kind: 'cronTriggered', text: e.text }))
     if (!('drop' in ran) && e.origin.kind !== 'task-notification') {
       later(() => touchTickets($, e.text, undefined))
       // 設定改了 env 不用重開就生效：每次送出 prompt 重查一次任務工具
@@ -2435,8 +2639,7 @@ export const register: Register = (on, options) => {
   // 任務來源二：TaskCreate / TaskUpdate（整個 session 共用一份，只收主對話的）
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
-    // 這裡要用到 `ran.result`，條件寫開來型別才縮得進去
-    if (e.agentId === undefined && ran.deny === undefined && ran.isError !== true) {
+    if (e.agentId === undefined && succeeded(ran)) {
       const id = String(ran.result.task.id)
       later(() => dispatch($, { kind: 'created', id, subject: e.subject }))
     }
@@ -2456,26 +2659,87 @@ export const register: Register = (on, options) => {
   // 經手：改了票檔、或指令裡有票的路徑，算發出它的 loop 經手（只讀不算，所以 Read 不接）
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const ran = await next(e)
-    if (succeeded(ran)) later(() => touchTickets($, e.file_path, e.agentId))
-    void roadmapChanged($, wroteFile(e.file_path, ran))
+    fileWritten($, e, ran)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
-    if (succeeded(ran)) later(() => touchTickets($, e.file_path, e.agentId))
-    void roadmapChanged($, wroteFile(e.file_path, ran))
+    fileWritten($, e, ran)
     return ran
   }).catch(($, e, next) => next(e))
+  // 背景工作：結果帶 `backgroundTaskId`（run_in_background、Ctrl+B、逾時轉背景）就加一筆；
+  // 沒有這個欄位的前景指令和以前完全一樣，不多任何 host 呼叫
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
-    void roadmapChanged($, ranShell(ran))
+    shellDone($, e, ran)
     return ran
   }).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
-    void roadmapChanged($, ranShell(ran))
+    shellDone($, e, ran)
+    return ran
+  }).catch(($, e, next) => next(e))
+  // Monitor：結果的 `taskId`、`timeoutMs`、`persistent` 建一筆；剩餘時間由畫面那一側走。
+  // 每行輸出的通知（只有 `<event>`）在 prompt.submit 那裡就略過，結束通知照 shell 的路收
+  on('tool.call', { tool: 'Monitor' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (succeeded(ran)) {
+      const signal = monitorSignal(e, ran.result)
+      later(() => backgroundSignal($, signal))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+  // TaskStop：不會有結束通知，結果的 `task_id` 對到的那筆標被停掉（停的是 subagent 就對不到、不寫）
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (succeeded(ran)) {
+      const id = ran.result.task_id
+      later(() => backgroundSignal($, { kind: 'stopped', id }))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 背景工作的校正：對話停下時引擎給的快照（`background_tasks` 與 `session_crons`）。主對話與 subagent 停下都帶整個 session 的，
+  // 處理一樣；MCP task 只從這裡進來。快照沒有擁有者，不拿它改擁有者
+  on('classic.Stop', async ($, e, next) => {
+    const ran = await next(e)
+    snapshotLater($, e)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const ran = await next(e)
+    snapshotLater($, e)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 排程：CronCreate（含 `/loop` 走的）加一筆、CronDelete 拿掉，兩者之後都讀一次 CronList 比對
+  on('tool.call', { tool: 'CronCreate' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (succeeded(ran)) {
+      const signal = cronCreatedSignal(e, ran.result)
+      later(() => backgroundSignal($, signal))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'CronDelete' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (succeeded(ran)) later(() => backgroundSignal($, { kind: 'cronDeleted', id: e.id }))
+    return ran
+  }).catch(($, e, next) => next(e))
+  // ScheduleWakeup（`/loop` 動態模式）與 Workflow：都沒在這台機器實測過，照引擎的型別寫。
+  // 有機會實測時先驗這兩個（探測要先過引擎的原始碼掃描，在複本 validate 再換上）
+  on('tool.call', { tool: 'ScheduleWakeup' }, async ($, e, next) => {
+    const ran = await next(e)
+    const signal = succeeded(ran) ? wakeupSignal(e, ran.result) : undefined
+    if (signal !== undefined) later(() => backgroundSignal($, signal))
+    return ran
+  }).catch(($, e, next) => next(e))
+  // Workflow：結果的 `taskId`、`workflowName`、`runId` 建一筆；結束照 shell 的通知收（task-notification）
+  on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
+    const ran = await next(e)
+    const signal = succeeded(ran) ? workflowSignal(e, ran.result) : undefined
+    if (signal !== undefined) later(() => backgroundSignal($, signal))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -2783,14 +3047,14 @@ export const register: Register = (on, options) => {
     const pager = shape.pageCount > 1 && (
       <Box key="pager" flexDirection="row" gap={2}>
         <Text> </Text>
-        <Button key="pg-prev" label="上頁" plain hotkey="k" onPress={() => void turnPage($, currentTab, p - 1)} />
+        <Button key="pg-prev" label="上頁" plain hotkey="k" onPress={() => void turnPage($, currentTab, p - 1, content.unfollowsOnTurn === true)} />
         <Text dimColor>{`${p + 1}/${shape.pageCount}`}</Text>
         <Button
           key="pg-next"
           label="下頁"
           plain
           hotkey="j"
-          onPress={() => void turnPage($, currentTab, Math.min(shape.pageCount - 1, p + 1))}
+          onPress={() => void turnPage($, currentTab, Math.min(shape.pageCount - 1, p + 1), content.unfollowsOnTurn === true)}
         />
         <Text> </Text>
       </Box>
