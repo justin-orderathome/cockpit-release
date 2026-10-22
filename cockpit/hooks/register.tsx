@@ -2757,9 +2757,41 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   // 下框線右端的版本（留著的標示外框已經讀好，跟著 ctx 來）
   const version = await readVersion($)
   const changed = new Set(changedFields(config.raw))
+  // 「套用範本」自成一組，排在「更新」上面；這一版的 plugin 沒有範本就不顯示。
+  // 範本有沒套用過的項目時換成高亮的「範本有 N 項新的」
+  const hasTemplate = await hasTemplates($)
+  const newItems = hasTemplate ? await newTemplateCount($) : 0
+  const templateLabel = templateButtonLabel(newItems)
+  const templateRows = (): Row<JSX.Element>[] => {
+    const group = { id: '範本', label: '範本' }
+    return [
+      { id: 'set-group-範本', group, isHeader: true, value: <Text dimColor>範本</Text> },
+      {
+        id: 'set-template',
+        group,
+        value: (
+          <Box flexDirection="row" paddingLeft={2}>
+            <Button
+              key="apply-template"
+              label={templateLabel}
+              plain
+              onPress={() => void applyTemplate($).catch(err => $.ui.toast(`沒有套用範本：${reasonOf(err)}`))}
+            >
+              {newItems > 0 && (
+                <Text bold color={INDICATOR_COLOR}>
+                  {templateLabel}
+                </Text>
+              )}
+            </Button>
+          </Box>
+        ),
+      },
+    ]
+  }
 
   const rows: Row<JSX.Element>[] = []
   for (const name of [...new Set(FIELDS.map(f => f.group))]) {
+    if (name === '更新' && hasTemplate) rows.push(...templateRows())
     const group = { id: name, label: name }
     rows.push({
       id: `set-group-${name}`,
@@ -2819,11 +2851,6 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   if (version === '') return { actions, actionsWidth, rows }
   const versionText = `cockpit ${version}`
   const checkLabel = indicator?.kind === 'downloaded' ? SWITCH_NOW : '檢查版本'
-  // 「套用範本」在檢查版本左邊；這一版的 plugin 沒有範本就不顯示。
-  // 範本有沒套用過的項目時換成高亮的「範本有 N 項新的」（寬度照這個字算，放不下就照 footPlan 退回框內）
-  const hasTemplate = await hasTemplates($)
-  const newItems = hasTemplate ? await newTemplateCount($) : 0
-  const templateLabel = templateButtonLabel(newItems)
   const status = (
     <Box key="settings-version" flexDirection="row" gap={2}>
       <Text dimColor>{versionText}</Text>
@@ -2831,20 +2858,6 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
         <Text bold color={INDICATOR_COLOR}>
           {indicator.text}
         </Text>
-      )}
-      {hasTemplate && (
-        <Button
-          key="apply-template"
-          label={templateLabel}
-          plain
-          onPress={() => void applyTemplate($).catch(err => $.ui.toast(`沒有套用範本：${reasonOf(err)}`))}
-        >
-          {newItems > 0 && (
-            <Text bold color={INDICATOR_COLOR}>
-              {templateLabel}
-            </Text>
-          )}
-        </Button>
       )}
       {indicator?.kind === 'downloaded' ? (
         <Button key="switch-now" label={SWITCH_NOW} plain onPress={() => void updaterOf($).then(u => u.reload())} />
@@ -2857,7 +2870,6 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   const statusWidth = footWidth([
     { plain: versionText },
     ...(indicator ? [{ plain: indicator.text }] : []),
-    ...(hasTemplate ? [{ plain: templateLabel }] : []),
     { plain: checkLabel },
     { plain: '更新紀錄' },
   ])
