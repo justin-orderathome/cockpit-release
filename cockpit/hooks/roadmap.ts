@@ -278,6 +278,12 @@ export function parseEffort(input: {
               : 'loose'
 
   const nextBuild = builds.find(t => t.state === 'takeable')
+  const ticketOnly =
+    stage === 'building' && nextBuild
+      ? `${SKILL}:implement ${nextBuild.path} 完成後把這張票的 Status: 改成 resolved。`
+      : undefined
+  // 有規格書時「繼續」整份交給 implement-spec 平行做，「單張」只做第一張可接手的；沒有規格書只能一張一張做
+  const specWide = ticketOnly && input.hasSpec ? `${SKILL}:implement-spec ${dir}/spec.md` : undefined
   const next =
     stage === 'mapping'
       ? `${SKILL}:wayfinder ${dir}/map.md`
@@ -285,8 +291,8 @@ export function parseEffort(input: {
         ? `${SKILL}:to-spec ${dir}/map.md`
         : stage === 'needsTickets'
           ? `${SKILL}:to-tickets ${dir}/spec.md`
-          : stage === 'building' && nextBuild
-            ? `${SKILL}:implement ${nextBuild.path} 完成後把這張票的 Status: 改成 resolved。`
+          : ticketOnly
+            ? (specWide ?? ticketOnly)
             : stage === 'loose' && parsed.some(t => t.status === 'needs-triage')
               ? `${SKILL}:triage`
               : undefined
@@ -309,6 +315,7 @@ export function parseEffort(input: {
           : [...decisions, ...builds],
     ),
     next,
+    nextTicket: specWide ? ticketOnly : undefined,
     mtimeMs: input.mtimeMs,
   }
 }
@@ -545,6 +552,7 @@ const GROUP_INDENT = 2
 const TICKET_INDENT = 4
 const ICON = 1 + ROW_GAP
 const NEXT = textWidth('繼續') + ROW_GAP
+const NEXT_TICKET = textWidth('單張') + ROW_GAP
 const MIN_NAME = 8
 /** 已結案的票有幾張以上才收成一行；只有一張時收了也沒省到 */
 const MIN_CLOSED = 2
@@ -582,7 +590,8 @@ export function viewRoadmap(
     // 沒有票（例如只有規格書）就不顯示進度
     const progress = effort.progress.total > 0 ? `${effort.progress.done}/${effort.progress.total}` : ''
     const stage = STAGE_LABELS[effort.stage]
-    const fixed = (progress ? textWidth(progress) + ROW_GAP : 0) + (effort.next ? NEXT : 0)
+    const fixed =
+      (progress ? textWidth(progress) + ROW_GAP : 0) + (effort.next ? NEXT : 0) + (effort.nextTicket ? NEXT_TICKET : 0)
     const showStage = width - fixed - (textWidth(stage) + ROW_GAP) >= MIN_NAME
     const rest = fixed + (showStage ? textWidth(stage) + ROW_GAP : 0)
     rows.push({

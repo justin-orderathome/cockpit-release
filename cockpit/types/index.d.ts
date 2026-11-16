@@ -202,6 +202,8 @@ export type Effort = {
   progress: { done: number; total: number }
   /** 「繼續」要填進輸入框的文字；沒有下一步則無 */
   next?: string
+  /** 「單張」要填的文字：實作中有規格書時「繼續」填整份的 implement-spec，這個只做第一張可接手的票；其他情況無 */
+  nextTicket?: string
   /** 資料夾裡最近一次修改的時間 */
   mtimeMs: number
 }

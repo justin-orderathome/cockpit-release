@@ -88,11 +88,11 @@ prompt：找出 chipA 的所有呼叫點…
 | 找路中 | 有地圖，還有沒結案的決策票，或「Not yet specified」還有內容（整行括號的註記不算） | `/mattpocock-skills:wayfinder <map.md>` |
 | 待寫規格 | 地圖已抵達，沒有 `spec.md` | `/mattpocock-skills:to-spec <map.md>` |
 | 待拆票 | 有 `spec.md`，沒有實作票 | `/mattpocock-skills:to-tickets <spec.md>` |
-| 實作中 | 有沒結案的實作票 | `/mattpocock-skills:implement <第一張可接手的票>`，並請它完成後把 `Status:` 改成 `resolved` |
+| 實作中 | 有沒結案的實作票 | 有 `spec.md`：`/mattpocock-skills:implement-spec <spec.md>`，整份規格平行做；旁邊另有暗色的「單張」，填 `/mattpocock-skills:implement <第一張可接手的票>`，並請它完成後把 `Status:` 改成 `resolved`。沒有 `spec.md`：「繼續」直接填單張的那一行，沒有「單張」 |
 | 已完成 | 票全部結案（預設不顯示，按下框線的「已完成 effort N」展開） | — |
 | 零散 | 沒有地圖與規格書的票 | 有 `needs-triage` 的票時填 `/mattpocock-skills:triage` |
 
-開頭有 `Type:`（research／prototype／grilling／task）的是決策票，其餘是實作票。實作票的 `Status:` 是 `resolved`、`done`、`wontfix`，或驗收清單全部打勾，就算結案。`Status:` 是 `ready-for-human` 的票標成「待人處理」，「繼續」會跳過它，只剩這種票時不填任何東西。agent 用 Write／Edit 改了 `.scratch/` 底下的檔案會自動重讀；用 Bash／PowerShell 改的，指令跑完後比對檔名、大小與修改時間，有變才重讀。自己在編輯器改的，按 `r`（下框線的「重新載入路線圖」）重新讀取。「已完成 effort N」與「重新載入路線圖」放在下框線而不是「路線圖」那一行：[任務] 會自動翻到進行中的任務，那一行常常不在畫面上的這一頁。
+開頭有 `Type:`（research／prototype／grilling／task）的是決策票，其餘是實作票。實作票的 `Status:` 是 `resolved`、`done`、`wontfix`，或驗收清單全部打勾，就算結案。`Status:` 是 `ready-for-human` 的票標成「待人處理」，「繼續」與「單張」都會跳過它，只剩這種票時兩顆都不顯示。agent 用 Write／Edit 改了 `.scratch/` 底下的檔案會自動重讀；用 Bash／PowerShell 改的，指令跑完後比對檔名、大小與修改時間，有變才重讀。自己在編輯器改的，按 `r`（下框線的「重新載入路線圖」）重新讀取。「已完成 effort N」與「重新載入路線圖」放在下框線而不是「路線圖」那一行：[任務] 會自動翻到進行中的任務，那一行常常不在畫面上的這一頁。
 
 **決策的要點**（路線圖）：結案的決策票，滑過時說明區不再顯示當初的 Question，而是那一題最後定了什麼，不用點開檔案就能回想。說明區只放一則，依序找第一個有的：
 

@@ -1818,6 +1818,16 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
                         <Text color={accent}>繼續</Text>
                       </Button>
                     )}
+                    {f.nextTicket && (
+                      <Button
+                        key={`effort-ticket-${f.name}`}
+                        label="單張"
+                        plain
+                        onPress={() => void fillPrompt($, f.nextTicket ?? '', `${f.name}：單張`)}
+                      >
+                        <Text dimColor>單張</Text>
+                      </Button>
+                    )}
                   </Box>
                 ),
               }
