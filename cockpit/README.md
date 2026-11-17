@@ -126,7 +126,49 @@ prompt：找出 chipA 的所有呼叫點…
 
 **票放在 GitHub／GitLab 時**：文件標題寫明是 GitHub 或 GitLab 時，路線圖改用你自己裝好、登入好的 `gh`／`glab` 只讀遠端的 issue（`wayfinder:map` 標籤的 issue 是地圖，只發 GET，不改任何 issue）。session 開始時不連網，第一次打開 [任務] 才讀；之後切回 [任務] 超過 60 秒、按 `r`、或跑過 `gh issue`／`gh api`／`glab issue`／`glab api` 指令才重讀，不定時重讀。點票用瀏覽器開那張 issue，effort 行尾的 `↗` 開地圖。沒裝或沒登入 `gh`／`glab`、讀不到 repo、離線時，路線圖裡寫原因與要執行的指令（例如 `! gh auth login`）。[設定] 的「路線圖讀 GitHub／GitLab」關掉就完全不連網、也不顯示遠端路線圖。Linear、Jira 這類其他線上的 tracker 不顯示路線圖。
 
-**GitLab 專案的 tracker 文件**：路線圖用 `glab api` 只讀；GitLab 免費版沒有子票與 blocks 連結，所以子票只認 body 開頭的 `Part of #<父>`（決策票與規格書寫地圖、實作票寫規格書），卡住只讀 `Blocked by: #n`。可以把 [`docs/issue-tracker-gitlab.md`](docs/issue-tracker-gitlab.md) 複製成那個專案的 `docs/agents/issue-tracker.md` 再調整（GitLab 的讀法還沒在真的 GitLab 上實測）。
+**GitLab 專案的 tracker 文件**：路線圖用 `glab api` 只讀；GitLab 免費版沒有子票與 blocks 連結，所以子票只認 body 開頭的 `Part of #<父>`（決策票與規格書寫地圖、實作票寫規格書），卡住只讀 `Blocked by: #n`。可以把下面的範本存成那個專案的 `docs/agents/issue-tracker.md` 再調整；標題要保留「GitLab」，cockpit 靠它決定用 `glab` 讀（GitLab 的讀法還沒在真的 GitLab 上實測）。
+
+<details>
+<summary>GitLab 的 tracker 文件範本</summary>
+
+````markdown
+# Issue tracker: GitLab
+
+Issues and specs for this repo live as GitLab issues on the project's own GitLab host. Use the `glab` CLI; it picks the host and project from the git remote, so never hard-code `gitlab.com`.
+
+## Conventions
+
+- Issue states are `opened` / `closed`. Close an implementation issue as the last step of implementing it, after leaving a comment that summarises what was done.
+- Triage state is a label (see `triage-labels.md` for the role strings).
+- Comments and conversation history go in issue comments (`glab issue note <iid> -m ...`).
+
+## Wayfinding operations
+
+Used by `/wayfinder`, `/to-spec`, `/to-tickets`. There are no native sub-issues on GitLab Free, so parent/child is written in the issue body and mirrored by a `relates_to` link.
+
+- **Map**: an issue labelled `wayfinder:map` (Notes / Decisions so far / Not yet specified / Out of scope body). One map per effort.
+- **Decision ticket**: a child of the map labelled `wayfinder:<type>` (`research` / `prototype` / `grilling` / `task`), with the question under `## Question`.
+- **Spec**: a child of the map with **no** `wayfinder:*` label.
+- **Implementation ticket**: a child of the spec (any labels).
+- **Parent link (required)**: the first lines of the body, before any `##` heading, contain `Part of #<parent iid>`:
+  - decision tickets and the spec write `Part of #<map iid>`;
+  - implementation tickets write `Part of #<spec iid>`.
+  Also create a `relates_to` issue link from the parent to the child (`glab api --method POST projects/:id/issues/<parent iid>/links -f target_project_id=<id> -f target_issue_iid=<child iid>`). The link only speeds up reading; the `Part of` line is what counts.
+- **Order**: children are listed in the order their links were created.
+- **Blocking**: a `Blocked by: #n, #m` line near the top of the body (before any `##`). A ticket is unblocked when every issue it lists is closed. Do not rely on GitLab "blocks" links (Premium only).
+- **Claim**: assign yourself before any work.
+- **Resolve a decision ticket**: append the answer as a comment, close the issue, then add a line to the map's Decisions so far that starts with the issue link (`#n`, `group/project#n` or the full URL) followed by `：` and the gist.
+
+## When a skill says "publish to the issue tracker"
+
+Create a GitLab issue with `glab issue create`, write the `Part of` line first, then add the `relates_to` link to its parent.
+
+## When a skill says "fetch the relevant ticket"
+
+`glab issue view <iid> --comments`. The user will normally pass the issue URL or iid directly.
+````
+
+</details>
 
 **用 `npx skills` 裝的 skill**（[SKILL]）：`npx skills add <owner/repo> -g` 把 skill 一個一個放進 `~/.claude/skills/`，Claude Code 看到的是一個個個人 skill，不知道它們是同一包。cockpit 讀 `npx skills` 記下的 `~/.agents/.skill-lock.json`，把查得到來源的 skill 依來源分組，例如 `emilkowalski/skills` 一組；只有一個 skill 的來源也自成一組。來源組和 plugin 組一起照字母排，組名可以在「SKILL 覆寫」改短。查不到來源的（自己寫的、claude.ai 同步的、其他工具裝的）留在「我的 skill」；沒有這個檔或讀不懂時，全部照舊在「我的 skill」。比對只看 skill 名稱，lock 檔跟著 skill 清單一起重讀（裝了新的 skill 後 `/reload-plugins` 或重開）。裝在專案裡的（不加 `-g`）也一樣分組：來源記在專案根目錄的 `skills-lock.json`，cockpit 一併讀進來；同一個 skill 全域和專案裡都有記錄時，照全域的來源，因為同名時生效的是使用者層那一份。
 
