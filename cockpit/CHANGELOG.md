@@ -2,6 +2,10 @@
 
 每一版改了什麼，新的在最上面。
 
+## 0.11.1
+
+- 路線圖的遠端票不再在標題後面印出整串網址：票號與標題改成跟本機的票一樣是按鈕，點了用預設瀏覽器開那張 issue；effort 行尾只留 `↗`，點了開地圖。網址不再擠掉 effort 的標題與階段。
+
 ## 0.11.0
 
 - 路線圖也能讀 GitHub／GitLab 上的 effort：專案的 `docs/agents/issue-tracker.md` 寫 GitHub 或 GitLab 時，改用你自己裝好、登入好的 `gh`／`glab` 只讀 issue（只發 GET，不改任何東西），階段、進度、狀態與「繼續」「單張」的判斷跟本機完全相同。每張 `wayfinder:map` issue 是一個 effort；開著的全列，已結案的只列最近 5 張，地圖已關閉就算已完成。

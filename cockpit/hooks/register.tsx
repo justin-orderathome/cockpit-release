@@ -639,6 +639,21 @@ async function openInEditor($: EngineInterface, shown: string, sample?: string, 
   }
 }
 
+/**
+ * 用預設瀏覽器開遠端 issue 的網址。不用引擎的 Link：終端機不支援 OSC 8 時它會把網址印在文字後面。
+ * argv 直接交給 explorer.exe，不經 cmd（R-01），網址裡的 & 不會被拆開。
+ * explorer.exe 開成功也常回結束碼 1，所以不看結束碼，只在起不來時說。
+ */
+async function openInBrowser($: EngineInterface, url: string) {
+  try {
+    const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+    await $.process.run(isWindows ? ['explorer.exe', url] : ['xdg-open', url])
+  } catch (err) {
+    $.ui.log(`openInBrowser：${reasonOf(err)}`, { to: 'debug' })
+    $.ui.toast(`無法開啟網頁：${reasonOf(err)}`)
+  }
+}
+
 async function loadPrompts($: EngineInterface) {
   const home = await homeDir($)
   const global = parsePrompts((await files($).read(`${home}/.claude/cockpit/prompts.md`)) ?? '', 'global')
@@ -1627,7 +1642,7 @@ async function resetOptions($: EngineInterface) {
  * 每一行顯示哪些字、多寬時留哪幾欄，由 `viewRoadmap` 與 `taskCells` 決定；這裡只負責畫與掛上動作。
  */
 async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, now: number): Promise<TabContent> {
-  const { Box, Text, Button, Link } = ui
+  const { Box, Text, Button } = ui
   // 會隨時間變的字畫成 Client，在畫面那一側自己走；沒有 Client 的介面畫成這一刻的樣子，下次重繪才更新
   const Client = 'Client' in ui ? ui.Client : undefined
   // 這個分頁要用的狀態一次讀完
@@ -1899,13 +1914,14 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
                         <Text dimColor>單張</Text>
                       </Button>
                     )}
-                    {/* 遠端的地圖：↗ 交給終端機開網頁，不經 cockpit 的程序；點行本身仍是展開 */}
+                    {/* 遠端的地圖：↗ 用瀏覽器開地圖 issue；點行本身仍是展開 */}
                     {f.mapUrl !== undefined && (
-                      <Box key={`effort-map-${f.name}`}>
-                        <Text>
-                          <Link href={f.mapUrl} label={MAP_LINK_MARK} />
-                        </Text>
-                      </Box>
+                      <Button
+                        key={`effort-map-${f.name}`}
+                        label={MAP_LINK_MARK}
+                        plain
+                        onPress={() => void openInBrowser($, f.mapUrl ?? '')}
+                      />
                     )}
                     {r.warning !== undefined && <Text color="warning">{WARN_MARK}</Text>}
                   </Box>
@@ -1951,22 +1967,14 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
                 <Box flexDirection="row" gap={ROW_GAP} paddingLeft={r.indent}>
                   {ticketIcon(t)}
                   <Box flexGrow={1} flexShrink={1}>
-                    {t.url !== undefined ? (
-                      // 遠端的票：Link 交給終端機開 issue 網址，不經 cockpit 的程序（R-01）
-                      <Box key={`ticket-btn-${t.ref}`}>
-                        <Text dimColor={t.state === 'done'} wrap="truncate-end">
-                          <Link href={t.url} label={r.label} />
-                        </Text>
-                      </Box>
-                    ) : (
-                      <Button
-                        key={`ticket-btn-${t.ref}`}
-                        label={r.label}
-                        plain
-                        dimColor={t.state === 'done'}
-                        onPress={() => void openInEditor($, t.ref)}
-                      />
-                    )}
+                    {/* 遠端的票用瀏覽器開 issue，本機的票用 VS Code 開檔；畫面一樣只寫票號與標題 */}
+                    <Button
+                      key={`ticket-btn-${t.ref}`}
+                      label={r.label}
+                      plain
+                      dimColor={t.state === 'done'}
+                      onPress={() => void (t.url !== undefined ? openInBrowser($, t.url) : openInEditor($, t.ref))}
+                    />
                   </Box>
                   {r.waiting && <Text dimColor>{r.waiting}</Text>}
                   {r.model !== undefined && <Text>{r.model}</Text>}
