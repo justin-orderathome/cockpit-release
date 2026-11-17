@@ -2,6 +2,19 @@
 
 每一版改了什麼，新的在最上面。
 
+## 0.11.0
+
+- 路線圖也能讀 GitHub／GitLab 上的 effort：專案的 `docs/agents/issue-tracker.md` 寫 GitHub 或 GitLab 時，改用你自己裝好、登入好的 `gh`／`glab` 只讀 issue（只發 GET，不改任何東西），階段、進度、狀態與「繼續」「單張」的判斷跟本機完全相同。每張 `wayfinder:map` issue 是一個 effort；開著的全列，已結案的只列最近 5 張，地圖已關閉就算已完成。
+  - 票號寫成 `#705`，別的 repo 的寫 `repo#12`；「繼續」與「單張」填完整的 issue 網址，「單張」接「完成後照 tracker 文件留言並關閉這張 issue。」。
+  - 點票用瀏覽器開那張 issue，effort 行尾的 `↗` 開地圖；點行本身照舊是展開。被卡住的票平常寫「等 N 張」，點開 effort 才去抓是等哪幾張。讀不到的跨 repo 子票算等待中，effort 行尾標 `!`。
+  - 什麼時候連網：session 開始不連網，第一次打開 [任務] 才讀；之後按 `r`、隔 60 秒以上切回 [任務]、或跑過 `gh issue`／`gh api`／`glab issue`／`glab api` 指令時重讀，不定時重讀。重讀帶 ETag，沒變就不扣 GitHub 額度。
+  - 讀不到時面板照樣能用：沒裝 `gh`／`glab`、沒登入、讀不到 repo、文件與 remote 不一致時，框內頂端寫原因與指令；離線、逾時或撞到額度時保留上次結果、變暗，下框線標「離線 · 13:40」這類短標籤。
+  - 登入多個 `gh` 帳號時，作用中的帳號讀不到會自動試其他帳號（token 只經環境變數傳，不會出現在畫面或 log）。
+  - [設定] 多了「路線圖讀 GitHub／GitLab」開關，預設開；關掉就跟以前一樣不連網、不顯示路線圖。
+- 經手也認遠端的票：文字裡的 issue 網址、`owner/repo#n`，以及 `gh issue … n`、`glab issue … n`、`gh api`／`glab api …/issues/n` 指令。單獨的 `#n` 不算。
+- 用 GitLab 的專案照 README「effort 放在哪」的慣例寫 tracker 文件（規格書寫 `Part of #地圖`、實作票寫 `Part of #規格書`）。GitLab 讀取器是照官方文件寫的，還沒在實機上驗過；點票開瀏覽器也還沒在每種終端機驗過。
+- 本機 `.scratch/` 的路線圖畫面與操作不變。
+
 ## 0.10.2
 
 - 路線圖「實作中」的 effort 有 `spec.md` 時，「繼續」改填 `/mattpocock-skills:implement-spec <spec.md>`，把整份規格交給它平行做；旁邊多一顆暗色的「單張」，填原本的 `/mattpocock-skills:implement <第一張可接手的票>`。沒有 `spec.md` 的照舊只有「繼續」，填單張的那一行。

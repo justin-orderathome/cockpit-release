@@ -19,6 +19,8 @@ export type Settings = {
   skillLayout: 'grid' | 'list'
   /** 開場時自己看有沒有發布新版，有就下載，下次開啟換上 */
   autoUpdate: boolean
+  /** 路線圖讀 GitHub／GitLab 的 issue；關掉時完全不連網，線上的 tracker 不顯示路線圖 */
+  remoteRoadmap: boolean
 }
 
 /** 四個分頁：id、顯示名稱與快捷鍵 */
@@ -99,6 +101,16 @@ export const FIELDS = [
     ],
   },
   {
+    group: '任務',
+    field: 'remoteRoadmap',
+    label: '路線圖讀 GitHub／GitLab',
+    fallback: 'on',
+    options: [
+      { value: 'on', label: '開' },
+      { value: 'off', label: '關' },
+    ],
+  },
+  {
     group: '更新',
     field: 'autoUpdate',
     label: '自動更新',
@@ -144,5 +156,6 @@ export function parseSettings(options: Readonly<Record<string, unknown>> | undef
     howto: raw.howto === 'on',
     skillLayout: raw.skillLayout as Settings['skillLayout'],
     autoUpdate: raw.autoUpdate === 'on',
+    remoteRoadmap: raw.remoteRoadmap === 'on',
   }
 }

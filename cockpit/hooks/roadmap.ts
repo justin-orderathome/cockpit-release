@@ -1,10 +1,15 @@
-import type { Effort, EffortStage, ModelUse, Ticket, TicketKind, TicketState } from '../types'
+import type { Effort, EffortStage, ModelUse, Ticket, TicketKind } from '../types'
+import { LOCAL_CLOSE_HINT, count, gistDetail, judgeEffort, mapGists, section } from './effortJudge'
+import type { Gists, NormalizedEffort, NormalizedStatus, NormalizedTicket } from './effortJudge'
 import { tidy } from './files'
 import type { FileEntry, Files } from './files'
 import type { HandlerMark } from './handled'
 import { ROW_GAP, fitText, foldLabel, textWidth } from './layout'
 import { modelLabels } from './modelLabel'
 import type { LabelSlot } from './modelLabel'
+import { gitlabRoadmap } from './gitlabRoadmap'
+import { githubRoadmap } from './githubRoadmap'
+import type { RemotePorts } from './remoteCore'
 
 /**
  * 讀目前專案放 effort 的目錄（預設 `.scratch/`）底下的每個 effort，判斷它走到哪、下一步要做什麼。
@@ -20,15 +25,22 @@ export const ROADMAP_ROOT = '.scratch'
 /** 專案說明 issue tracker 放在哪的文件；寫票的 skill 也照它，所以路線圖跟著它找 */
 export const TRACKER_DOC = 'docs/agents/issue-tracker.md'
 
+/** 路線圖從哪裡讀：本機的目錄，或 GitHub／GitLab 的 issue */
+export type TrackerSource = { kind: 'local'; root: string } | { kind: 'github' } | { kind: 'gitlab' }
+
 /**
- * 從 `docs/agents/issue-tracker.md` 的內容找 effort 放在哪個目錄：取第一個 `<目錄>/<effort>/` 這種路徑的目錄。
- * 沒有文件或認不出來就是 `.scratch`；標題寫明是線上的 tracker（沒有本機目錄）就是 undefined，不顯示路線圖。
+ * 從 `docs/agents/issue-tracker.md` 的內容看路線圖從哪裡讀。本機：取第一個 `<目錄>/<effort>/` 這種路徑的目錄，
+ * 沒有文件或認不出來就是 `.scratch`。標題寫明是 GitHub／GitLab 就是那一種；其他線上的 tracker
+ * （Linear、Jira）是 undefined，不顯示路線圖。
  */
-export function trackerRoot(doc: string | undefined): string | undefined {
-  if (doc === undefined) return ROADMAP_ROOT
+export function trackerRoot(doc: string | undefined): TrackerSource | undefined {
+  const local = (root: string): TrackerSource => ({ kind: 'local', root })
+  if (doc === undefined) return local(ROADMAP_ROOT)
   const found = /`(?:\.\/)?((?:[\w.@-]+\/)*[\w.@-]+)\/<[^>`\s]+>/.exec(doc)?.[1]
-  if (found !== undefined && !found.split('/').includes('..')) return found
-  return /^#\s.*\b(?:github|gitlab|linear|jira)\b/im.test(doc) ? undefined : ROADMAP_ROOT
+  if (found !== undefined && !found.split('/').includes('..')) return local(found)
+  const online = /^#\s.*\b(github|gitlab|linear|jira)\b/im.exec(doc)?.[1]?.toLowerCase()
+  if (online === undefined) return local(ROADMAP_ROOT)
+  return online === 'github' || online === 'gitlab' ? { kind: online } : undefined
 }
 
 /** 階段的顯示名稱 */
@@ -41,10 +53,8 @@ export const STAGE_LABELS: Record<EffortStage, string> = {
   loose: '零散',
 }
 
-const SKILL = '/mattpocock-skills'
 const DONE_STATUSES = new Set(['resolved', 'done', 'wontfix', 'closed'])
 const DECISION_TYPES = new Set(['research', 'prototype', 'grilling', 'task'])
-const UNTRIAGED_STATUSES = new Set(['needs-triage', 'needs-info'])
 const HUMAN_STATUS = 'ready-for-human'
 
 /** 寫檔工具動到的路徑在不在放 effort 的目錄底下 */
@@ -57,20 +67,6 @@ export const touchesRoadmap = (path: string, root: string) => {
 const field = (text: string, name: string) =>
   new RegExp(`^\\s*\\*{0,2}${name}:\\*{0,2}\\s*(.*?)\\s*$`, 'im').exec(text)?.[1]
 
-/** `## <heading>` 底下到下一個 `##` 之間的正文，去掉 HTML 註解 */
-function section(text: string, heading: string): string | undefined {
-  const lines = text.replace(/\r\n/g, '\n').split('\n')
-  const title = new RegExp(`^##\\s+${heading}\\s*$`, 'i')
-  const at = lines.findIndex(l => title.test(l))
-  if (at < 0) return undefined
-  const end = lines.findIndex((l, i) => i > at && /^##\s/.test(l))
-  return lines
-    .slice(at + 1, end < 0 ? undefined : end)
-    .join('\n')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .trim()
-}
-
 /** 票的問題或要做的內容 */
 function detailOf(text: string): string | undefined {
   const question = section(text, 'Question') ?? section(text, 'What to build')
@@ -79,38 +75,13 @@ function detailOf(text: string): string | undefined {
   return inline || undefined
 }
 
-/** 地圖 Decisions so far／Out of scope 裡的一行：開頭的連結指到哪、要點 */
-type Gist = { link: string; text: string }
-
-/** 地圖的要點：結案的決策票先找 Decisions so far（已定），再找 Out of scope（不做） */
-type Gists = { decided: Gist[]; dropped: Gist[] }
-
 /** Answer 第一段最多幾行 */
 const ANSWER_LINES = 5
 
-/** `[文字](連結)` 只留文字 */
-const unlink = (text: string) => text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-
-/**
- * 地圖某一段裡每一行的開頭連結與要點：要點取連結之後第一個 `：` 或 `:` 後面的字，
- * 沒有冒號就整行；去掉 `**`，連結只留文字，反引號照留。開頭不是連結的行不算。
- */
-function gistsOf(map: string, heading: string): Gist[] {
-  return (section(map, heading) ?? '').split('\n').flatMap(line => {
-    const found = /^\s*(?:[-*+]\s+)?\[[^\]]*\]\(\s*<?([^)>\s]+)>?[^)]*\)/.exec(line)
-    if (found === null) return []
-    const rest = line.slice(found[0].length)
-    const colon = rest.search(/[：:]/)
-    const raw = colon < 0 ? line.replace(/^\s*[-*+]\s+/, '') : rest.slice(colon + 1)
-    const text = unlink(raw).replace(/\*\*/g, '').trim()
-    return text === '' ? [] : [{ link: found[1] ?? '', text }]
-  })
-}
-
-/** 地圖連結是不是指到這張票：跟「經手」一樣用路徑或結尾幾段（只有檔名也算）比，斜線方向、`./` 前綴都對得到 */
-const pointsTo = (link: string, path: string) => {
+/** 地圖連結是不是指到這張票：跟「經手」一樣用 ref 或結尾幾段（只有檔名也算）比，斜線方向、`./` 前綴都對得到 */
+const pointsTo = (link: string, ref: string) => {
   const rel = link.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
-  return rel !== '' && (rel === path || path.endsWith(`/${rel}`))
+  return rel !== '' && (rel === ref || ref.endsWith(`/${rel}`))
 }
 
 /**
@@ -145,12 +116,8 @@ function answerLead(text: string): string | undefined {
  * 結案的決策票的說明區只放一則：地圖 Decisions so far 的要點（已定）、Out of scope 的要點（不做）、
  * Answer 第一段、Question，依序取第一個有的。同一張票出現好幾行時取第一行。
  */
-function closedDetail(path: string, text: string, gists: Gists): string | undefined {
-  const decided = gists.decided.find(g => pointsTo(g.link, path))
-  if (decided) return `已定：${decided.text}`
-  const dropped = gists.dropped.find(g => pointsTo(g.link, path))
-  if (dropped) return `不做：${dropped.text}`
-  return answerLead(text) ?? detailOf(text)
+function closedDetail(ref: string, text: string, gists: Gists): string | undefined {
+  return gistDetail(gists, link => pointsTo(link, ref)) ?? answerLead(text) ?? detailOf(text)
 }
 
 /** 第一個 `#` 標題，去掉 `01 —`、`01:` 這類編號前綴；沒有標題就用檔名 */
@@ -160,11 +127,8 @@ function titleOf(text: string, file: string): string {
   return raw.replace(/^\d+\s*(?:[—–:.\-]\s*)?/, '').trim() || raw
 }
 
-type Parsed = Omit<Ticket, 'state' | 'waitingOn'> & {
-  status: string
-  isDone: boolean
-  blockedBy: number[]
-}
+/** 本機的票正規化前：`Blocked by:` 還是票號，要等同一種的票都讀完才對得到 ref */
+type Parsed = Omit<NormalizedTicket, 'blockedBy'> & { blockedBy: number[] }
 
 /**
  * `Blocked by:` 裡的票號：`—`、`None …`、`（無；…）` 這類寫法表示沒有被卡住；
@@ -175,7 +139,16 @@ function blockersOf(value: string): number[] {
   return [...value.matchAll(/(?<![#\d])\d{1,3}(?!\d)/g)].map(m => Number(m[0]))
 }
 
-function parseTicket(path: string, file: string, text: string, gists: Gists): Parsed {
+/** 本機票的 `Status:`（與核取方塊）→ 正規化的狀態 */
+function statusOf(status: string, isDone: boolean): NormalizedStatus {
+  if (isDone) return 'done'
+  if (status === 'claimed') return 'claimed'
+  if (status === 'needs-triage') return 'untriaged'
+  if (status === 'needs-info') return 'needsInfo'
+  return status === HUMAN_STATUS ? 'human' : 'open'
+}
+
+function parseTicket(ref: string, file: string, text: string, gists: Gists): Parsed {
   // 決策票的 `Type:` 在標頭區（第一個 `##` 之前），而且是四種類型之一；內文裡的 Type 不算
   const header = text.split(/^##\s/m)[0] ?? ''
   const type = (field(header, 'Type') ?? '').toLowerCase().split(/\s/)[0] ?? ''
@@ -184,49 +157,26 @@ function parseTicket(path: string, file: string, text: string, gists: Gists): Pa
   const kind: TicketKind = DECISION_TYPES.has(type) ? 'decision' : 'build'
   const isDone = DONE_STATUSES.has(status) || (boxes.length > 0 && boxes.every(Boolean))
   return {
-    number: /^(\d+)/.exec(file)?.[1] ?? '',
-    path,
+    ref,
+    label: /^(\d+)/.exec(file)?.[1] ?? '',
     title: titleOf(text, file),
     kind,
-    status,
-    isDone,
+    status: statusOf(status, isDone),
     blockedBy: blockersOf(field(text, 'Blocked by') ?? ''),
     // 結案的決策票顯示決定了什麼；其餘照舊是 Question 或 What to build
-    detail: kind === 'decision' && isDone ? closedDetail(path, text, gists) : detailOf(text),
+    detail: kind === 'decision' && isDone ? closedDetail(ref, text, gists) : detailOf(text),
   }
 }
 
-/**
- * 同一種票之間判斷狀態：卡住它的票（只認同一種、存在的編號）都結案了才可接手；
- * 沒被卡住、但標明要人做的（`ready-for-human`）是「待人處理」，不交給 agent
- */
-function withStates(tickets: readonly Parsed[]): Ticket[] {
-  const byNumber = new Map(tickets.map(t => [Number(t.number), t]))
-  return tickets.map(({ status, isDone, blockedBy, ...t }): Ticket => {
-    const waitingOn = blockedBy.flatMap(n => {
-      const blocker = byNumber.get(n)
-      return blocker && !blocker.isDone ? [blocker.number] : []
-    })
-    const state: TicketState = isDone
-      ? 'done'
-      : status === 'claimed'
-        ? 'claimed'
-        : waitingOn.length > 0 || UNTRIAGED_STATUSES.has(status)
-          ? 'waiting'
-          : status === HUMAN_STATUS
-            ? 'human'
-            : 'takeable'
-    return { ...t, state, waitingOn }
-  })
+/** 票號換成 ref：只認同一種、存在的編號 */
+function withRefs(parsed: readonly Parsed[]): NormalizedTicket[] {
+  const refsOf = (kind: TicketKind) => new Map(parsed.filter(t => t.kind === kind).map(t => [Number(t.label), t.ref]))
+  const byKind = { decision: refsOf('decision'), build: refsOf('build') }
+  return parsed.map(t => ({ ...t, blockedBy: { refs: t.blockedBy.flatMap(n => byKind[t.kind].get(n) ?? []) } }))
 }
 
-const count = (tickets: readonly Ticket[]) => ({
-  done: tickets.filter(t => t.state === 'done').length,
-  total: tickets.length,
-})
-
-/** 一個 effort 的檔案內容 → 它的階段、進度與下一步。 */
-export function parseEffort(input: {
+/** 本機一個 effort 的檔案內容 → 正規化的 effort；判斷交給 `judgeEffort` */
+export function normalizeLocalEffort(input: {
   name: string
   map?: string
   hasSpec: boolean
@@ -236,88 +186,29 @@ export function parseEffort(input: {
   mtimeMs: number
   /** 放 effort 的目錄；沒給就是 `.scratch` */
   root?: string
-}): Effort {
+}): NormalizedEffort {
   const dir = `${input.root ?? ROADMAP_ROOT}/${input.name}`
   // 地圖本來就讀了；沒有地圖時兩段都是空的，結案的決策票直接走 Answer 的退路
-  const gists: Gists = {
-    decided: gistsOf(input.map ?? '', 'Decisions so far'),
-    dropped: gistsOf(input.map ?? '', 'Out of scope'),
-  }
+  const gists = mapGists(input.map ?? '')
   const parsed = [...input.issues]
     .sort((a, b) => a.file.localeCompare(b.file))
     .map(i => parseTicket(`${dir}/issues/${i.file}`, i.file, i.text, gists))
-  const ofKind = (kind: TicketKind) => withStates(parsed.filter(t => t.kind === kind))
-  const decisions = ofKind('decision')
-  const builds = ofKind('build')
-
-  const hasMap = input.map !== undefined
-  // 決策票都結案、而且「還沒釐清」的部分是空的，才算抵達終點；
-  // 整行包在括號裡的是註記（例如「（已無待決事項）」），不算還沒釐清
-  const fog = (section(input.map ?? '', 'Not yet specified') ?? '')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l !== '' && !/^[（(].*[）)]$/.test(l))
-  const isArrived = hasMap && decisions.every(t => t.state === 'done') && fog.length === 0
-  // 實作票開在別的 effort 時，規格書自己的 Status 說它做完了沒
-  const specDone = DONE_STATUSES.has((field(input.spec ?? '', 'Status') ?? '').toLowerCase().split(/\s/)[0] ?? '')
-  const stage: EffortStage =
-    hasMap && !isArrived
-      ? 'mapping'
-      : builds.length > 0
-        ? builds.every(t => t.state === 'done')
-          ? 'done'
-          : 'building'
-        : input.hasSpec
-          ? specDone
-            ? 'done'
-            : 'needsTickets'
-          : hasMap
-            ? 'needsSpec'
-            : parsed.length > 0 && [...decisions, ...builds].every(t => t.state === 'done')
-              ? 'done'
-              : 'loose'
-
-  const nextBuild = builds.find(t => t.state === 'takeable')
-  const ticketOnly =
-    stage === 'building' && nextBuild
-      ? `${SKILL}:implement ${nextBuild.path} 完成後把這張票的 Status: 改成 resolved。`
-      : undefined
-  // 有規格書時「繼續」整份交給 implement-spec 平行做，「單張」只做第一張可接手的；沒有規格書只能一張一張做
-  const specWide = ticketOnly && input.hasSpec ? `${SKILL}:implement-spec ${dir}/spec.md` : undefined
-  const next =
-    stage === 'mapping'
-      ? `${SKILL}:wayfinder ${dir}/map.md`
-      : stage === 'needsSpec'
-        ? `${SKILL}:to-spec ${dir}/map.md`
-        : stage === 'needsTickets'
-          ? `${SKILL}:to-tickets ${dir}/spec.md`
-          : ticketOnly
-            ? (specWide ?? ticketOnly)
-            : stage === 'loose' && parsed.some(t => t.status === 'needs-triage')
-              ? `${SKILL}:triage`
-              : undefined
-
-  const destination = section(input.map ?? '', 'Destination')
-    ?.split('\n')
-    .map(l => l.replace(/\*\*/g, '').trim())
-    .find(l => l !== '')
   return {
     name: input.name,
-    destination,
-    stage,
-    decisions,
-    builds,
-    progress: count(
-      builds.length > 0 && (stage === 'building' || stage === 'done')
-        ? builds
-        : hasMap || input.hasSpec
-          ? decisions
-          : [...decisions, ...builds],
-    ),
-    next,
-    nextTicket: specWide ? ticketOnly : undefined,
+    mapRef: input.map === undefined ? undefined : `${dir}/map.md`,
+    mapBody: input.map,
+    specRef: input.hasSpec ? `${dir}/spec.md` : undefined,
+    // 實作票開在別的 effort 時，規格書自己的 Status 說它做完了沒
+    specDone: DONE_STATUSES.has((field(input.spec ?? '', 'Status') ?? '').toLowerCase().split(/\s/)[0] ?? ''),
+    tickets: withRefs(parsed),
+    closeHint: LOCAL_CLOSE_HINT,
     mtimeMs: input.mtimeMs,
   }
+}
+
+/** 本機一個 effort 的檔案內容 → 它的階段、進度與下一步 */
+export function parseEffort(input: Parameters<typeof normalizeLocalEffort>[0]): Effort {
+  return judgeEffort(normalizeLocalEffort(input))
 }
 
 /** `root` 底下每個資料夾裡的檔案與票（只列目錄，不讀內容）。沒有那個目錄就是空的。 */
@@ -407,12 +298,21 @@ export async function readRoadmap(fs: RoadmapFs, root = ROADMAP_ROOT): Promise<E
 
 /** 可能讓畫面上的路線圖變舊的事 */
 export type RoadmapEvent =
-  /** session 開始、切到 [任務]、按「重新載入」：一律重讀 */
+  /** session 開始、/clear 之後的預載：本機一律重讀（同 `open`）；遠端不連網 */
+  | { kind: 'start' }
+  /** 切到 [任務]（session 一開就停在 [任務] 也算）：本機一律重讀；遠端距離上次讀取超過 60 秒才讀 */
   | { kind: 'open' }
+  /** 按「重新載入」（r）：一律重讀 */
+  | { kind: 'reload' }
   /** 寫檔工具跑完：成功寫了放 effort 的目錄底下的檔案才重讀 */
   | { kind: 'wrote'; path: string; isOk: boolean }
-  /** shell 指令跑完：放 effort 的目錄的指紋變了才重讀。指令失敗也可能已經改了檔案，所以只排除被擋下、根本沒跑的 */
-  | { kind: 'ran'; isBlocked: boolean }
+  /**
+   * shell 指令跑完：放 effort 的目錄的指紋變了才重讀。指令失敗也可能已經改了檔案，所以只排除被擋下、根本沒跑的。
+   * `command` 是指令字串：遠端看它有沒有 `gh issue`、`gh api` 這類會改 issue 的指令
+   */
+  | { kind: 'ran'; isBlocked: boolean; command?: string }
+  /** 在路線圖點開一個 effort：本機不讀；GitHub 對它被卡住的票抓擋路者清單 */
+  | { kind: 'expand'; effort: string }
 
 /**
  * 路線圖什麼時候要重讀。回傳的函式收一件事與放 effort 的目錄：需要重讀就讀，回傳新的 efforts；
@@ -472,53 +372,80 @@ export function roadmapWatch() {
 export type RoadmapSource = {
   /**
    * 一件事之後要放上畫面的 efforts；不必重讀、讀到的和上次給出去的一樣、或被更新的一輪蓋過，都是 undefined。
-   * `fs` 接在專案根目錄底下。跟路線圖無關的事不碰 `fs`。
+   * `fs` 接在專案根目錄底下。跟路線圖無關的事不碰 `fs`。`remote` 是遠端讀取器要的引擎操作（跑 `gh`、寫 debug log）；
+   * 沒給時線上的 tracker 跟還沒支援一樣給一次空的。
    */
-  next: (event: RoadmapEvent, fs: RoadmapFs) => Promise<Effort[] | undefined>
+  next: (event: RoadmapEvent, fs: RoadmapFs, remote?: RemotePorts) => Promise<Effort[] | undefined>
   /** `/clear` 之後畫面已經清空：記著的目錄、指紋與上次給出去的都不算數 */
   reset: () => void
 }
 
 /**
- * 畫面上的路線圖從哪來：effort 放在哪個目錄（照專案的 tracker 文件，只在重新開啟或它被寫時重看）、
- * 什麼時候重讀（`roadmapWatch`）、讀到的跟上次給出去的一不一樣，都在這裡決定。
- * 文件說是線上的 tracker 就沒有路線圖，給一次空的。
+ * 畫面上的路線圖從哪來：照專案的 tracker 文件挑讀取器（只在重新開啟或它被寫時重看）、
+ * 什麼時候重讀（本機是 `roadmapWatch`，GitHub 是 `githubRoadmap`）、讀到的跟上次給出去的一不一樣，都在這裡決定。
+ * 本機的讀取器把檔案正規化、交給 `judgeEffort`；GitHub 的讀取器在 `githubRoadmap`、GitLab 的在 `gitlabRoadmap`；
+ * 其他線上的 tracker 給一次空的。
  */
 export function roadmapSource(): RoadmapSource {
   let watch = roadmapWatch()
-  // undefined：還沒看過 tracker 文件；null：沒有路線圖（線上的 tracker）
-  let root: string | null | undefined
+  const remotes = { github: githubRoadmap(), gitlab: gitlabRoadmap() }
+  // undefined：還沒看過 tracker 文件；null：沒有讀得到的路線圖（還沒支援的線上 tracker）
+  let source: TrackerSource | null | undefined
   let shown: string | undefined
-  const give = (efforts: Effort[]) => {
+  // 上次給出去的是哪一種來源讀的：換成遠端來源而還沒讀到時，畫面上別的來源的 effort 要先拿掉
+  let shownFrom: TrackerSource['kind'] | 'none' | undefined
+  const give = (efforts: Effort[], from: TrackerSource['kind'] | 'none') => {
+    shownFrom = from
     const json = JSON.stringify(efforts)
     if (json === shown) return undefined
     shown = json
     return efforts
   }
+  const fromRemote = async (kind: 'github' | 'gitlab', event: RoadmapEvent, remote: RemotePorts) => {
+    const efforts = await remotes[kind].next(event, remote)
+    if (efforts !== undefined) return give(efforts, kind)
+    return shownFrom !== undefined && shownFrom !== kind ? give([], kind) : undefined
+  }
   return {
-    next: async (event, fs) => {
+    next: async (event, fs, remote) => {
+      // 點開 effort 只有遠端要補抓擋路者，不碰 tracker 文件
+      if (event.kind === 'expand') return source != null && source.kind !== 'local' && remote !== undefined ? fromRemote(source.kind, event, remote) : undefined
       // 沒成功寫進去、被擋下沒跑：檔案沒變
       if ((event.kind === 'wrote' && !event.isOk) || (event.kind === 'ran' && event.isBlocked)) return undefined
       // tracker 文件被改了，目錄可能換了：當成重新開啟，一律重讀
       const isTrackerDoc = event.kind === 'wrote' && event.isOk && tidy(event.path).endsWith(TRACKER_DOC)
-      if (root === null && !isTrackerDoc && event.kind !== 'open') return undefined
-      if (root === undefined || event.kind === 'open' || isTrackerDoc) root = trackerRoot(await fs.read(TRACKER_DOC)) ?? null
-      if (root === null) return give([])
-      const efforts = await watch(isTrackerDoc ? { kind: 'open' } : event, fs, root)
-      return efforts === undefined ? undefined : give(efforts)
+      const isReopen = event.kind === 'open' || event.kind === 'reload' || event.kind === 'start' || isTrackerDoc
+      // 線上的 tracker：寫檔與 shell 指令不碰檔案，要不要連網由遠端讀取器決定
+      if (source !== undefined && source?.kind !== 'local' && !isReopen)
+        return source !== null && remote !== undefined ? fromRemote(source.kind, event, remote) : undefined
+      if (source === undefined || isReopen) {
+        source = trackerRoot(await fs.read(TRACKER_DOC)) ?? null
+        // 不讀遠端：「讀取中／讀不到」（票 20）不再畫；沒變時 register 不寫
+        if (source == null || source.kind === 'local') await remote?.status?.(null)
+      }
+      if (source !== null && source.kind !== 'local' && remote !== undefined) return fromRemote(source.kind, isTrackerDoc ? { kind: 'reload' } : event, remote)
+      if (source === null || source.kind !== 'local') return give([], source?.kind ?? 'none')
+      const efforts = await watch(isReopen ? { kind: 'open' } : event, fs, source.root)
+      return efforts === undefined ? undefined : give(efforts, 'local')
     },
     reset: () => {
       watch = roadmapWatch()
-      root = undefined
+      remotes.github.reset()
+      remotes.gitlab.reset()
+      source = undefined
       shown = undefined
+      shownFrom = undefined
     },
   }
 }
 
 /** 路線圖在 [任務] 裡的一行；文字都已經裁到放得下 */
 export type RoadmapRow =
-  /** 一個 effort：`label` 是「▸ 名稱」；`stage` 太窄時拿掉；`count` 沒有票時是空的 */
-  | { kind: 'effort'; effort: Effort; isOpen: boolean; label: string; stage?: string; count: string }
+  /**
+   * 一個 effort：`label` 是「▸ 名稱」；`stage` 太窄時拿掉；`count` 沒有票時是空的；
+   * `warning` 是局部讀不到的原因（行尾標 `!`，滑過時說明區寫它）
+   */
+  | { kind: 'effort'; effort: Effort; isOpen: boolean; label: string; stage?: string; count: string; warning?: string }
   /** 展開後的行都帶著 `indent`（縮排幾格）：文字是照它裁的，畫的時候也照它縮 */
   | { kind: 'destination'; effort: Effort; text: string; indent: number }
   /** 一組票的小計：「▾ 決策 1/3」「▸ 實作 4/4」；`foldId` 是收合狀態的鍵 */
@@ -526,7 +453,8 @@ export type RoadmapRow =
   /** 收起來的已結案的票：「▸ 已結案 9」；攤開後這一行還在，票照編號列在後面 */
   | { kind: 'closed'; effort: Effort; id: string; text: string; foldId: string; isOpen: boolean; indent: number }
   /**
-   * 一張票：`label` 是「02 標題」（票號留在前面，才對得上 `waiting` 的「等 01、02」）；要人做的票 `waiting` 是「待人處理」。
+   * 一張票：`label` 是「02 標題」（票號留在前面，才對得上 `waiting` 的「等 01、02」；同一個 effort 的票號補到一樣寬，
+   * 放不下時只截標題）；要人做的票 `waiting` 是「待人處理」。
    * 被這個 session 經手的票：`model` 是行尾補到欄寬的模型標示（主對話經手的、跟主對話相同的、放不下的沒有），
    * `detail` 是說明區的字，最前面一行寫誰經手
    */
@@ -553,6 +481,12 @@ const TICKET_INDENT = 4
 const ICON = 1 + ROW_GAP
 const NEXT = textWidth('繼續') + ROW_GAP
 const NEXT_TICKET = textWidth('單張') + ROW_GAP
+/** effort 行尾的警告標記 */
+export const WARN_MARK = '!'
+const WARN = textWidth(WARN_MARK) + ROW_GAP
+/** 遠端 effort 行尾開地圖 issue 的連結 */
+export const MAP_LINK_MARK = '↗'
+const MAP_LINK = textWidth(MAP_LINK_MARK) + ROW_GAP
 const MIN_NAME = 8
 /** 已結案的票有幾張以上才收成一行；只有一張時收了也沒省到 */
 const MIN_CLOSED = 2
@@ -584,14 +518,18 @@ export function viewRoadmap(
 ): RoadmapView {
   const rows: RoadmapRow[] = []
   /** 每一張列出來的票：在 `rows` 的第幾行、完整的名稱、扣掉標示前名稱有幾格、經手者的模型 */
-  const marked: (LabelSlot & { at: number; label: string })[] = []
+  const marked: (LabelSlot & { at: number; head: string; title: string })[] = []
   for (const effort of efforts.filter(f => showDone || f.stage !== 'done')) {
     const isOpen = open.has(effort.name)
     // 沒有票（例如只有規格書）就不顯示進度
     const progress = effort.progress.total > 0 ? `${effort.progress.done}/${effort.progress.total}` : ''
     const stage = STAGE_LABELS[effort.stage]
     const fixed =
-      (progress ? textWidth(progress) + ROW_GAP : 0) + (effort.next ? NEXT : 0) + (effort.nextTicket ? NEXT_TICKET : 0)
+      (progress ? textWidth(progress) + ROW_GAP : 0) +
+      (effort.next ? NEXT : 0) +
+      (effort.nextTicket ? NEXT_TICKET : 0) +
+      (effort.mapUrl !== undefined ? MAP_LINK : 0) +
+      (effort.warning !== undefined ? WARN : 0)
     const showStage = width - fixed - (textWidth(stage) + ROW_GAP) >= MIN_NAME
     const rest = fixed + (showStage ? textWidth(stage) + ROW_GAP : 0)
     rows.push({
@@ -601,8 +539,11 @@ export function viewRoadmap(
       label: fitText(foldLabel(isOpen, effort.name), Math.max(4, width - rest)),
       stage: showStage ? stage : undefined,
       count: progress,
+      ...(effort.warning !== undefined ? { warning: effort.warning } : {}),
     })
     if (!isOpen) continue
+    // 票號欄：補到這個 effort 最寬的票號
+    const labelCol = Math.max(0, ...[...effort.decisions, ...effort.builds].map(t => textWidth(t.label)))
     if (effort.destination)
       rows.push({ kind: 'destination', effort, text: `終點：${effort.destination}`, indent: GROUP_INDENT })
     for (const [name, tickets] of [
@@ -641,26 +582,35 @@ export function viewRoadmap(
       for (const ticket of tickets) {
         if (!showClosed && ticket.state === 'done') continue
         const waiting =
-          ticket.waitingOn.length > 0 ? `等 ${ticket.waitingOn.join('、')}` : ticket.state === 'human' ? '待人處理' : ''
+          ticket.waitingOn.length > 0
+            ? `等 ${ticket.waitingOn.join('、')}`
+            : ticket.waitingCount !== undefined
+              ? `等 ${ticket.waitingCount} 張`
+              : ticket.state === 'human'
+                ? '待人處理'
+                : ''
         const room = width - TICKET_INDENT - ICON - (waiting ? textWidth(waiting) + ROW_GAP : 0)
-        const label = ticket.number ? `${ticket.number} ${ticket.title}` : ticket.title
+        const head = ticket.label ? `${ticket.label}${' '.repeat(labelCol - textWidth(ticket.label))} ` : ''
+        const label = head + ticket.title
         // 結案的票不標誰經手（經手的紀錄要等路線圖重讀才拿掉）
-        const mark = ticket.state === 'done' ? undefined : handled?.get(ticket.path)
+        const mark = ticket.state === 'done' ? undefined : handled?.get(ticket.ref)
         const detail = mark === undefined ? ticket.detail : [mark.note, ticket.detail].filter(Boolean).join('\n')
-        marked.push({ at: rows.length, label, room, use: mark?.use })
+        marked.push({ at: rows.length, head, title: ticket.title, room, use: mark?.use })
         rows.push({ kind: 'ticket', effort, ticket, label, waiting, indent: TICKET_INDENT, detail })
       }
     }
   }
   // 模型標示整個路線圖算一塊，一起決定完整或縮寫；名稱照扣掉標示後的寬度裁
   const { labels } = modelLabels(marked, base)
-  marked.forEach(({ at, label, room }, i) => {
+  marked.forEach(({ at, head, title, room }, i) => {
     const row = rows[at]
     if (row?.kind !== 'ticket') return
     const model = labels[i]
     // 標示已經補到同一欄寬
     const used = model === undefined ? 0 : textWidth(model) + ROW_GAP
-    rows[at] = { ...row, label: fitText(label, Math.max(4, room - used)), model }
+    // 票號不縮寫：只截標題
+    const label = head === '' ? fitText(title, Math.max(4, room - used)) : head + fitText(title, Math.max(1, room - used - textWidth(head)))
+    rows[at] = { ...row, label, model }
   })
   return { rows, doneCount: efforts.filter(f => f.stage === 'done').length }
 }

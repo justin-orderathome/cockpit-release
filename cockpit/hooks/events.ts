@@ -16,8 +16,8 @@ export const succeeded = <R extends Ran>(ran: R): ran is Exclude<R, { deny: stri
 /** 寫檔的工具：成功寫了哪個檔，由 roadmap 看要不要重讀 */
 export const wroteFile = (path: string, ran: Ran): RoadmapEvent => ({ kind: 'wrote', path, isOk: succeeded(ran) })
 
-/** shell 的工具：指令失敗也可能已經改了檔案，所以只排除被擋下、根本沒跑的 */
-export const ranShell = (ran: Ran): RoadmapEvent => ({ kind: 'ran', isBlocked: ran.deny !== undefined })
+/** shell 的工具：指令失敗也可能已經改了檔案，所以只排除被擋下、根本沒跑的。指令字串給遠端看有沒有改 issue */
+export const ranShell = (command: string, ran: Ran): RoadmapEvent => ({ kind: 'ran', isBlocked: ran.deny !== undefined, command })
 
 /** 例外或其他丟出來的東西 → 說給使用者聽的原因 */
 export const reasonOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))

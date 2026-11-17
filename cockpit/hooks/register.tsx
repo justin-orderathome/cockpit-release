@@ -39,7 +39,7 @@ import type { Files } from './files'
 import { composeFill } from './fill'
 import { boardAfter, handledAfter, stepBoard } from './board'
 import type { BoardState, BoardStep } from './board'
-import { applyHandled, handledTickets, handlerMarks } from './handled'
+import { applyHandled, handledTickets, handlerMarks, mayNameTicket } from './handled'
 import type { Handled, HandledEvent } from './handled'
 import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
@@ -68,7 +68,10 @@ import {
   templateButtonLabel,
 } from './templates'
 import type { SkillApply } from './templates'
-import { roadmapSource, viewRoadmap } from './roadmap'
+import { MAP_LINK_MARK, WARN_MARK, roadmapSource, viewRoadmap } from './roadmap'
+import type { RemotePorts } from './remoteCore'
+import { remoteNotice } from './remoteStatus'
+import type { RemoteStatus } from './remoteStatus'
 import type { RoadmapEvent } from './roadmap'
 import { changes, isSame } from './same'
 import {
@@ -122,6 +125,7 @@ import {
   NO_TASK_TOOLS_HINT,
   agentCells,
   agentLabels,
+  clockOf,
   formatDuration,
   hasRunning,
   hasTaskTools,
@@ -233,6 +237,8 @@ const tutorial = atom({ plugin: 'cockpit', key: 'tutorial' } as const, NO_TUTORI
 const makingTutorial = atom({ plugin: 'cockpit', key: 'makingTutorial' } as const, '')
 const tutorialMenu = atom({ plugin: 'cockpit', key: 'tutorialMenu' } as const, false)
 const roadmap = atom({ plugin: 'cockpit', key: 'roadmap' } as const, [] as Effort[])
+/** 遠端路線圖讀得怎樣（讀取中、讀不到與原因）；本機的 tracker 是 null。只記這個 session */
+const roadmapRemote = atom({ plugin: 'cockpit', key: 'roadmapRemote' } as const, null as RemoteStatus | null)
 const openEfforts = atom({ plugin: 'cockpit', key: 'openEfforts' } as const, [] as string[])
 /** 路線圖裡手動攤開或收起過的組與「已結案」；只記這個 session，重開回到預設 */
 const roadmapFolds = atom({ plugin: 'cockpit', key: 'roadmapFolds' } as const, {} as Record<string, boolean>)
@@ -872,10 +878,39 @@ async function makeSkillHowtos($: EngineInterface, run: HowtoRun) {
  */
 async function roadmapChanged($: EngineInterface, event: RoadmapEvent) {
   try {
-    // 每個工具跑完都會來這裡；跟路線圖無關的由 roadmap 擋掉，不讀任何檔
-    const efforts = await roadmapFrom.next(event, await projectFiles($))
+    // 每個工具跑完都會來這裡；跟路線圖無關的由 roadmap 擋掉，不讀任何檔、不連網。
+    // [設定] 關掉「路線圖讀 GitHub／GitLab」時不給遠端操作：線上的 tracker 不連網、給空的（改設定會重載 mod，再打開時下次切到 [任務] 才讀）
+    const remote = config.settings.remoteRoadmap ? remotePorts($) : undefined
+    const efforts = await roadmapFrom.next(event, await projectFiles($), remote)
     if (efforts !== undefined) await showRoadmap($, efforts)
-  } catch {}
+  } catch (err) {
+    $.ui.log(`更新路線圖失敗：${reasonOf(err)}`, { to: 'debug' })
+  }
+}
+
+/** 讀遠端路線圖時一個 `gh` 指令最多等多久（毫秒） */
+const REMOTE_TIMEOUT = 30_000
+
+/**
+ * 遠端路線圖（`remoteCore.ts` 與 GitHub／GitLab 讀取器）要用的引擎操作：`gh` 在專案根目錄跑（不跟 shell `cd`，`{owner}/{repo}` 照專案的 remote），
+ * argv 執行、不經 shell（R-01）；env 疊在 host 環境上（票 21 的 `GH_TOKEN`）。錯誤寫 debug log。
+ */
+function remotePorts($: EngineInterface): RemotePorts {
+  return {
+    run: async (argv, env) => {
+      const cwd = await projectRoot($)
+      return $.process.run(argv, { timeoutMs: REMOTE_TIMEOUT, ...(cwd !== undefined ? { cwd } : {}), ...(env ? { env } : {}) })
+    },
+    log: text => $.ui.log(text, { to: 'debug' }),
+    now: () => $.clock.now(),
+    status: next => remoteChanged($, next),
+    openEfforts: () => read($, openEfforts),
+  }
+}
+
+/** 遠端路線圖讀得怎樣變了（票 20）：寫進 atom，畫面照它畫讀取中、頂端一行或變暗；一樣就不寫 */
+async function remoteChanged($: EngineInterface, next: RemoteStatus | null) {
+  if (changes(await read($, roadmapRemote), () => next)) await update($, roadmapRemote, () => next)
 }
 
 /**
@@ -884,7 +919,10 @@ async function roadmapChanged($: EngineInterface, event: RoadmapEvent) {
  */
 async function showRoadmap($: EngineInterface, efforts: Effort[]) {
   // 路線圖空了：選的子分頁不存在就一起寫回「任務」（規則在 subtabs）。路線圖還有東西時，這次變化不會讓任何子分頁消失
-  const back = efforts.length === 0 ? await backIfGone($, async () => ({ efforts, background: await read($, background) })) : {}
+  const back =
+    efforts.length === 0
+      ? await backIfGone($, async () => ({ efforts, background: await read($, background), remote: await read($, roadmapRemote) }))
+      : {}
   const writes = await Promise.all([planWrites($, { roadmap: efforts, ...back }), handledWrites($, { kind: 'closed', open: openTickets(efforts) })])
   await writeAll(writes.flat())
 }
@@ -903,9 +941,9 @@ async function backIfGone($: EngineInterface, sources: () => Promise<SubtabSourc
 
 // ── 經手 ─────────────────────────────────────────────────
 
-/** 路線圖上還沒結案的票的路徑 */
+/** 路線圖上還沒結案的票的 ref（本機是路徑） */
 const openTickets = (efforts: readonly Effort[]) =>
-  efforts.flatMap(f => [...f.decisions, ...f.builds]).flatMap(t => (t.state === 'done' ? [] : [t.path]))
+  efforts.flatMap(f => [...f.decisions, ...f.builds]).flatMap(t => (t.state === 'done' ? [] : [t.ref]))
 
 /** 只改經手的紀錄要寫的（不碰任務板，所以只讀這一份）；沒變就沒有 */
 async function handledWrites($: EngineInterface, event: HandledEvent): Promise<Write[]> {
@@ -914,25 +952,36 @@ async function handledWrites($: EngineInterface, event: HandledEvent): Promise<W
 }
 
 /**
- * 某個 loop（主對話沒有 agentId）送出、派工或改檔的文字裡有沒有還沒結案的票：有就算它經手。
+ * 某個 loop（主對話沒有 agentId）送出、派工、改檔或跑的指令（`isShell`）裡有沒有還沒結案的票：有就算它經手。
  * 跟票無關的先擋掉，不問引擎任何事。旁觀而已，出錯也不影響原本的事。
  */
-async function touchTickets($: EngineInterface, text: string, agentId: string | undefined) {
+async function touchTickets($: EngineInterface, text: string, agentId: string | undefined, isShell = false) {
   try {
-    const touched = await touchedBy($, text, agentId)
+    const touched = await touchedBy($, text, agentId, isShell)
     if (touched !== undefined) await writeAll(await handledWrites($, touched))
-  } catch {}
+  } catch (err) {
+    $.ui.log(`記錄經手的票失敗：${reasonOf(err)}`, { to: 'debug' })
+  }
 }
 
 /** 文字裡有還沒結案的票時，那個 loop 經手了哪幾張；沒有、或出錯都是 undefined */
-async function touchedBy($: EngineInterface, text: string, agentId: string | undefined): Promise<HandledEvent | undefined> {
+async function touchedBy(
+  $: EngineInterface,
+  text: string,
+  agentId: string | undefined,
+  isShell = false,
+): Promise<HandledEvent | undefined> {
   try {
-    if (!/\.md\b/i.test(text)) return undefined
-    const open = openTickets(await read($, roadmap))
+    if (!mayNameTicket(text)) return undefined
+    const efforts = await read($, roadmap)
+    const open = openTickets(efforts)
     if (open.length === 0) return undefined
-    const tickets = handledTickets(text, open, await projectRoot($))
+    // 遠端的地圖都在本專案的 repo：沒指定 repo 的 gh／glab 指令只配這個 repo 的票
+    const home = efforts.find(f => f.mapUrl !== undefined)?.mapUrl
+    const tickets = handledTickets(text, open, await projectRoot($), isShell, home)
     return tickets.length > 0 ? { kind: 'touched', tickets, agentId } : undefined
-  } catch {
+  } catch (err) {
+    $.ui.log(`比對經手的票失敗：${reasonOf(err)}`, { to: 'debug' })
     return undefined
   }
 }
@@ -1367,14 +1416,15 @@ async function howtoCloseWrites($: EngineInterface): Promise<Write[]> {
 
 /** 按「重新載入路線圖」：重讀（只在「路線圖」子分頁有這個鍵，不動自動跟隨） */
 async function lookAtRoadmap($: EngineInterface) {
-  await roadmapChanged($, { kind: 'open' })
+  await roadmapChanged($, { kind: 'reload' })
 }
 
-/** 展開或收起 effort，並存起來 */
+/** 展開或收起 effort，並存起來；展開時遠端路線圖補抓它的擋路者清單（本機不讀） */
 async function toggleEffort($: EngineInterface, name: string) {
   const open = toggled(await read($, openEfforts), name)
   await update($, openEfforts, list => toggled(list, name))
   await $.store.set('openEfforts', open)
+  if (open.includes(name)) void roadmapChanged($, { kind: 'expand', effort: name })
 }
 
 /** 翻頁；`unfollows` 是在「任務」子分頁翻的（停止自動跟隨，和翻頁一起寫） */
@@ -1486,7 +1536,7 @@ async function backgroundSignal($: EngineInterface, signal: BackgroundSignal) {
   const step = await memory.background.next(signal, backgroundPorts($))
   if (step === undefined) return
   const { event, isEmpty } = step
-  const back = isEmpty ? await planWrites($, await backIfGone($, async () => ({ efforts: await read($, roadmap), background: EMPTY_BACKGROUND }))) : []
+  const back = isEmpty ? await planWrites($, await backIfGone($, async () => ({ efforts: await read($, roadmap), background: EMPTY_BACKGROUND, remote: await read($, roadmapRemote) }))) : []
   await writeAll([() => update($, background, l => applyBackground(l, event)), ...back])
 }
 
@@ -1509,8 +1559,8 @@ function shellDone(
   e: { command: string; description?: string; agentId?: string },
   ran: ToolCallResult<'Bash'> | ToolCallResult<'PowerShell'>,
 ) {
-  if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId))
-  void roadmapChanged($, ranShell(ran))
+  if (ran.deny === undefined) later(() => touchTickets($, e.command, e.agentId, true))
+  void roadmapChanged($, ranShell(e.command, ran))
   const bgId = succeeded(ran) ? ran.result.backgroundTaskId : undefined
   if (bgId !== undefined) later(() => backgroundSignal($, { kind: 'started', work: shellStart(bgId, e.command, e.description, e.agentId) }))
 }
@@ -1577,11 +1627,11 @@ async function resetOptions($: EngineInterface) {
  * 每一行顯示哪些字、多寬時留哪幾欄，由 `viewRoadmap` 與 `taskCells` 決定；這裡只負責畫與掛上動作。
  */
 async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, now: number): Promise<TabContent> {
-  const { Box, Text, Button } = ui
+  const { Box, Text, Button, Link } = ui
   // 會隨時間變的字畫成 Client，在畫面那一側自己走；沒有 Client 的介面畫成這一刻的樣子，下次重繪才更新
   const Client = 'Client' in ui ? ui.Client : undefined
   // 這個分頁要用的狀態一次讀完
-  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools, chosenSubtab, works, showOlder, waitingNow, using] = await Promise.all([
+  const [taskBoard, efforts, showDone, open, folds, handledNow, hasTools, chosenSubtab, works, showOlder, waitingNow, using, remote] = await Promise.all([
     read($, board),
     read($, roadmap),
     read($, showDoneEfforts),
@@ -1594,6 +1644,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     read($, backgroundOlderOpen),
     read($, waiting),
     read($, skillInUse),
+    read($, roadmapRemote),
   ])
   // subagent 列的「· 背景 N」與背景說明區的「由 subagent「…」開」、在等你決定的 subagent 列的 ?、
   // subagent 正在用的 skill（說明區的「用 …」）：幾份資料在這裡合起來，各自的狀態不互相塞
@@ -1613,7 +1664,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
   // ── 子分頁籤：哪些存在、各寫什麼、實際看哪一個，都由 subtabs 決定 ──
   const bar = subtabBar(
     chosenSubtab,
-    { efforts, background: works },
+    { efforts, background: works, remote },
     { tasks: { main, agentCount: view.agentCount, isRunning: hasRunning(taskBoard) }, roadmap: road, background: bg },
     cols,
   )
@@ -1672,7 +1723,17 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
         {NO_TASK_TOOLS_HINT}
       </Text>
     ) : undefined
-  const topLines = [subtabLine, remainingLine, hint].filter((l): l is JSX.Element => Boolean(l))
+  // 遠端路線圖讀取中、或從沒讀到過就讀不到：框內頂端一行（長的照框寬換行）；有上次結果時改成變暗與下框線的短標籤（票 20）
+  const notice = isRoadmap ? remoteNotice(remote, clockOf) : { isStale: false }
+  const remoteTop = notice.top && (
+    <Box key="roadmap-remote">
+      <Text wrap="wrap" color={notice.top.tone === 'dim' ? undefined : notice.top.tone} dimColor={notice.top.tone === 'dim'}>
+        {notice.top.text}
+      </Text>
+    </Box>
+  )
+  const topLines = [subtabLine, remainingLine, hint, remoteTop].filter((l): l is JSX.Element => Boolean(l))
+  const topRowCount = topLines.length - (remoteTop ? 1 : 0) + (notice.top ? Math.max(1, Math.ceil(textWidth(notice.top.text) / Math.max(1, cols))) : 0)
   const top =
     topLines.length === 0 ? undefined : (
       <Box key="tasks-top" flexDirection="column">
@@ -1802,17 +1863,27 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             if (r.kind === 'effort') {
               return {
                 id: `effort/${f.name}`,
+                // 讀不到遠端、畫的是上次的結果（票 20）與局部讀不到的原因（票 19）：說明區寫完整原因
+                ...(notice.reason !== undefined || r.warning !== undefined
+                  ? { detail: [notice.reason, r.warning].filter(Boolean).join('\n') }
+                  : {}),
                 value: (
                   <Box flexDirection="row" gap={ROW_GAP}>
                     <Box flexGrow={1} flexShrink={1}>
-                      <Button key={`effort-btn-${f.name}`} label={r.label} plain onPress={() => void toggleEffort($, f.name)} />
+                      <Button
+                        key={`effort-btn-${f.name}`}
+                        label={r.label}
+                        plain
+                        {...(notice.isStale ? { dimColor: true } : {})}
+                        onPress={() => void toggleEffort($, f.name)}
+                      />
                     </Box>
                     {r.stage !== undefined && (
                       <Text color={f.stage === 'done' ? 'success' : undefined} dimColor={f.stage !== 'done'}>
                         {r.stage}
                       </Text>
                     )}
-                    {r.count !== '' && <Text>{r.count}</Text>}
+                    {r.count !== '' && <Text dimColor={notice.isStale}>{r.count}</Text>}
                     {f.next && (
                       <Button key={`effort-next-${f.name}`} label="繼續" plain onPress={() => void fillPrompt($, f.next ?? '', f.name)}>
                         <Text color={accent}>繼續</Text>
@@ -1828,6 +1899,15 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
                         <Text dimColor>單張</Text>
                       </Button>
                     )}
+                    {/* 遠端的地圖：↗ 交給終端機開網頁，不經 cockpit 的程序；點行本身仍是展開 */}
+                    {f.mapUrl !== undefined && (
+                      <Box key={`effort-map-${f.name}`}>
+                        <Text>
+                          <Link href={f.mapUrl} label={MAP_LINK_MARK} />
+                        </Text>
+                      </Box>
+                    )}
+                    {r.warning !== undefined && <Text color="warning">{WARN_MARK}</Text>}
                   </Box>
                 ),
               }
@@ -1864,20 +1944,29 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             }
             const t = r.ticket
             return {
-              id: `ticket/${t.path}`,
+              id: `ticket/${t.ref}`,
               group: effortGroup,
               detail: r.detail,
               value: (
                 <Box flexDirection="row" gap={ROW_GAP} paddingLeft={r.indent}>
                   {ticketIcon(t)}
                   <Box flexGrow={1} flexShrink={1}>
-                    <Button
-                      key={`ticket-btn-${t.path}`}
-                      label={r.label}
-                      plain
-                      dimColor={t.state === 'done'}
-                      onPress={() => void openInEditor($, t.path)}
-                    />
+                    {t.url !== undefined ? (
+                      // 遠端的票：Link 交給終端機開 issue 網址，不經 cockpit 的程序（R-01）
+                      <Box key={`ticket-btn-${t.ref}`}>
+                        <Text dimColor={t.state === 'done'} wrap="truncate-end">
+                          <Link href={t.url} label={r.label} />
+                        </Text>
+                      </Box>
+                    ) : (
+                      <Button
+                        key={`ticket-btn-${t.ref}`}
+                        label={r.label}
+                        plain
+                        dimColor={t.state === 'done'}
+                        onPress={() => void openInEditor($, t.ref)}
+                      />
+                    )}
                   </Box>
                   {r.waiting && <Text dimColor>{r.waiting}</Text>}
                   {r.model !== undefined && <Text>{r.model}</Text>}
@@ -1969,6 +2058,7 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
     ...(showsClearBackground ? [{ hotkey: 'c', label: '清除已結束' }] : []),
     ...(showsDoneToggle ? [{ hotkey: 'd', label: doneLabel }] : []),
     ...(isRoadmap ? [{ hotkey: 'r', label: '重新載入路線圖' }] : []),
+    ...(notice.tag !== undefined ? [{ plain: notice.tag }] : []),
   ]
   const actions =
     actionPieces.length === 0 ? undefined : (
@@ -2013,15 +2103,21 @@ async function tasksTab($: EngineInterface, { ui, cols, accent }: TabContext, no
             onPress={() => void lookAtRoadmap($)}
           />
         )}
+        {notice.tag !== undefined && (
+          <Box key="roadmap-remote-tag">
+            <Text color="warning">{notice.tag}</Text>
+          </Box>
+        )}
       </Box>
     )
   const actionsWidth = footWidth(actionPieces)
 
   return {
-    ...(top === undefined ? {} : { top, topRows: topLines.length }),
+    ...(top === undefined ? {} : { top, topRows: topRowCount }),
     ...(actions === undefined ? {} : { actions, actionsWidth }),
     rows: isTasks ? todoRows : isRoadmap ? roadmapRows : backgroundRows,
-    emptyText: isTasks ? '模型使用待辦清單後，任務會顯示在這裡。' : isRoadmap ? '沒有進行中的 effort。' : '沒有背景工作。',
+    // 頂端已經寫了讀取中或讀不到的原因，就不再說「沒有進行中的 effort」
+    ...(notice.top !== undefined ? {} : { emptyText: isTasks ? '模型使用待辦清單後，任務會顯示在這裡。' : isRoadmap ? '沒有進行中的 effort。' : '沒有背景工作。' }),
     // 自動跟隨只在「任務」子分頁裡翻頁，永遠不換子分頁
     ...(isTasks ? { followId: view.followId, unfollowsOnTurn: true } : {}),
   }
@@ -2912,8 +3008,9 @@ async function loadSession($: EngineInterface, reason: Reload) {
   const first = startTab(config.settings.defaultTab, lastTab)
   await commit($, { tab: first })
 
-  // 背景預載：不等它們
-  void Promise.allSettled([refresh($), loadUsage($), loadPrompts($), loadSkills($), roadmapChanged($, { kind: 'open' })])
+  // 背景預載：不等它們。一開就停在 [任務] 算第一次打開 [任務]（遠端這時才讀），其他分頁的預載不連網
+  const roadmapEvent: RoadmapEvent = { kind: first === 'tasks' ? 'open' : 'start' }
+  void Promise.allSettled([refresh($), loadUsage($), loadPrompts($), loadSkills($), roadmapChanged($, roadmapEvent)])
   // 任務清單跨重載留著：完成數與總數照留著的清單對一次（耗時欄在畫面那一側自己走，這裡不開計時器）
   await writeAll(await taskWrites($, {}))
 }

@@ -4,6 +4,7 @@
  */
 import type { BackgroundList, Effort, Subtab } from '../types'
 import { isEmptyBackground } from './background'
+import type { RemoteStatus } from './remoteStatus'
 import { tabBar } from './layout'
 import type { TabSegment } from './layout'
 
@@ -17,12 +18,18 @@ export const SUBTABS: readonly { id: Subtab; label: string; hotkey: string }[] =
 /** 打開 [任務] 時預設的子分頁，也是正在看的子分頁變空時跳回去的那一個 */
 export const DEFAULT_SUBTAB: Subtab = 'tasks'
 
-/** 決定子分頁存不存在的原始狀態：畫面與寫入都拿得到這兩份 */
-export type SubtabSources = { efforts: readonly Effort[]; background: BackgroundList }
+/**
+ * 決定子分頁存不存在的原始狀態：畫面與寫入都拿得到這幾份。`remote` 是遠端路線圖讀得怎樣（票 20）：
+ * 讀取中、讀不到時要有路線圖子分頁才畫得出原因；沒給當作不讀遠端
+ */
+export type SubtabSources = { efforts: readonly Effort[]; background: BackgroundList; remote?: RemoteStatus | null }
 
-/** 子分頁存不存在：任務永遠在；路線圖有 effort 就在（全部結案也算）；背景有沒被隱藏的工作才在 */
-function isPresent(id: Subtab, { efforts, background }: SubtabSources): boolean {
-  if (id === 'roadmap') return efforts.length > 0
+/**
+ * 子分頁存不存在：任務永遠在；路線圖有 effort 就在（全部結案也算），遠端讀取中或讀不到也在（讀到了卻沒有地圖就不在）；
+ * 背景有沒被隱藏的工作才在
+ */
+function isPresent(id: Subtab, { efforts, background, remote }: SubtabSources): boolean {
+  if (id === 'roadmap') return efforts.length > 0 || remote?.kind === 'loading' || remote?.kind === 'failed'
   if (id === 'background') return !isEmptyBackground(background)
   return true
 }

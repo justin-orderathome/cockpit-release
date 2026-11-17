@@ -169,23 +169,56 @@ export type TicketKind = 'decision' | 'build'
 /** 結案、已認領、可接手、待人處理（`ready-for-human`），或在等（被卡住、待分類） */
 export type TicketState = 'done' | 'claimed' | 'takeable' | 'human' | 'waiting'
 
-/** `<放 effort 的目錄>/<effort>/issues/` 底下的一張票 */
+/** effort 裡的一張票（本機：`<放 effort 的目錄>/<effort>/issues/` 底下的檔；遠端：一張 issue） */
 export type Ticket = {
-  /** 檔名開頭的編號，例如 `03` */
-  number: string
-  /** 相對於專案根目錄的路徑 */
-  path: string
+  /** 顯示用的票號：本機是檔名開頭的編號（`03`），遠端是 `#705`、`repo#12` */
+  label: string
+  /** 票的身分：本機是相對於專案根目錄的路徑，遠端是 issue 網址。經手、列 id、要點比對都用它 */
+  ref: string
+  /** 只有遠端的票有：點票時用瀏覽器開這個網址 */
+  url?: string
   title: string
   kind: TicketKind
   state: TicketState
-  /** 還沒結案、卡住這張票的編號 */
+  /** 還沒結案、卡住這張票的票號（`label`） */
   waitingOn: string[]
+  /** 只知道還有幾張沒結案的擋路者、還沒抓是哪幾張時的張數（遠端還沒點開 effort 時）；`waitingOn` 有內容時沒有 */
+  waitingCount?: number
   /**
    * 說明區的字：票的問題（`## Question`）或要做的內容（`**What to build:**`）；
    * 結案的決策票改成要點（地圖的「已定：…」「不做：…」，或 `## Answer` 第一段）
    */
   detail?: string
 }
+
+/** 讀不到遠端路線圖的原因（票 20；分類與畫法在 `hooks/remoteStatus.ts`） */
+export type RemoteProblem =
+  /** `gh` 起不來：不在 PATH，或只有 `.cmd` shim（不經 shell 跑不起來，也不退回 `cmd /c`） */
+  | { kind: 'noCli' }
+  /** 沒登入或 token 壞了 */
+  | { kind: 'noAuth' }
+  /** 404：repo 不存在或這個帳號沒有權限。`repo` 是 `owner/repo`（讀不到 git remote 時沒有）；票 21 在這裡改試其他帳號 */
+  | { kind: 'notFound'; repo?: string }
+  /** tracker 文件寫 GitHub（GitLab），專案的 git remote 卻不是 GitHub（GitLab） */
+  | { kind: 'mismatch' }
+  /** 連不上，或 `gh` 跑到逾時 */
+  | { kind: 'offline'; isTimeout: boolean }
+  /** 額度用完；`resetAt` 是恢復的時間（毫秒），GitHub 沒說就沒有 */
+  | { kind: 'rateLimit'; resetAt?: number }
+  /** 其他（例如 HTTP 502、JSON 壞掉）；`reason` 不含 token */
+  | { kind: 'failed'; reason: string }
+
+/** 哪一種線上 tracker（面板上的字樣與指令照它寫） */
+export type RemoteTracker = 'github' | 'gitlab'
+
+/** 遠端路線圖這個 session 讀得怎樣；`null` 是不讀遠端（本機的 tracker）或還沒開始 */
+export type RemoteStatus =
+  /** 第一次讀、還沒讀到過 */
+  | { kind: 'loading'; tracker: RemoteTracker }
+  /** 讀到了；`at` 是開始讀的時間 */
+  | { kind: 'ok'; at: number }
+  /** 讀不到；`shownAt` 是畫面上那份結果是幾點讀的，沒讀到過就沒有 */
+  | { kind: 'failed'; tracker: RemoteTracker; problem: RemoteProblem; shownAt?: number }
 
 /** effort 走到哪：找路中、待寫規格、待拆票、實作中、已完成、零散 */
 export type EffortStage = 'mapping' | 'needsSpec' | 'needsTickets' | 'building' | 'done' | 'loose'
@@ -195,6 +228,8 @@ export type Effort = {
   name: string
   /** 地圖的終點（第一行）；沒有地圖則無 */
   destination?: string
+  /** 只有遠端有地圖時有：effort 行尾的 `↗` 用瀏覽器開這個網址 */
+  mapUrl?: string
   stage: EffortStage
   decisions: Ticket[]
   builds: Ticket[]
@@ -206,6 +241,8 @@ export type Effort = {
   nextTicket?: string
   /** 資料夾裡最近一次修改的時間 */
   mtimeMs: number
+  /** 局部讀不到的原因（例如跨 repo 的票無權限）：effort 行尾標 `!`，滑過時說明區寫它；讀得到時沒有 */
+  warning?: string
 }
 
 /** A 區用量的快照，來自 $.session.usage() 與 session.measure */
@@ -373,6 +410,8 @@ declare module 'claude-code' {
       openEfforts: string[]
       /** 路線圖裡手動攤開（true）或收起（false）過的組與「已結案」，鍵是 `<effort>/<決策|實作>` 或再加 `/已結案` */
       roadmapFolds: Record<string, boolean>
+      /** 遠端路線圖讀得怎樣（讀取中、讀不到與原因，見 `hooks/remoteStatus.ts`）；本機的 tracker 是 null */
+      roadmapRemote: RemoteStatus | null
       /** 是否顯示已完成的 effort */
       showDoneEfforts: boolean
       /** 這個 session 經手的票 → 最近一次經手的 loop（subagent 的 agentId；主對話是 null） */
