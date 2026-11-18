@@ -37,6 +37,7 @@ import {
   BOARD_BLOCK_TEXT,
   BOARD_PANEL_TOOL,
   BOARD_PLUGIN,
+  BOARD_QUICK_ACTIONS,
   BOARD_UPDATE_COMMAND,
   NO_FEED,
   BOARD_JOIN_COMMAND,
@@ -49,6 +50,7 @@ import {
   boardSubBar,
   clockText,
   changesBoard,
+  composeBoardQuick,
   feedAfter,
   isFetchUnsettled,
   isInRoom,
@@ -58,7 +60,7 @@ import {
   feedReading,
   toolsBlock,
 } from './boardPanel'
-import type { BoardAction, BoardReply, BoardRoomAction } from './boardPanel'
+import type { BoardAction, BoardQuick, BoardReply, BoardRoomAction } from './boardPanel'
 import { SENT_DETAIL_INDENT, fetchedNotice, receivedRows, sentRows } from './boardShares'
 import type { ShareButton } from './boardShares'
 import { isBoardShareUrl } from './boardShareUrl'
@@ -1481,6 +1483,18 @@ async function openBoardFolder($: EngineInterface, path: string) {
   } catch (err) {
     $.ui.log(`openBoardFolder：${reasonOf(err)}`, { to: 'debug' })
     $.ui.toast(`無法開啟資料夾：${reasonOf(err)}`)
+  }
+}
+
+/** [分享] [訊息]：把指令填進輸入框，不送出。填入規則見 `composeBoardQuick` */
+async function fillBoardQuick($: EngineInterface, text: string, label: string) {
+  try {
+    const box = await $.prompt.read()
+    const filled = await $.prompt.fill(composeBoardQuick(box.text, text))
+    $.ui.toast(filled.isFilled ? `已填入「${label}」，按 Esc 回到輸入框` : `無法填入「${label}」`)
+  } catch (err) {
+    $.ui.log(`fillBoardQuick：${reasonOf(err)}`, { to: 'debug' })
+    $.ui.toast(`無法填入「${label}」：${reasonOf(err)}`)
   }
 }
 
@@ -3347,7 +3361,20 @@ async function boardTab($: EngineInterface, { ui, cols, accent }: TabContext): P
   )
 
   const blocked = joinBlock(panel)
-  const marks = { joining, acting, canJoin: !isStale && blocked === null, canLeave: !isStale }
+  const marks = { joining, acting, canJoin: !isStale && blocked === null, canLeave: !isStale, canQuick: !isStale && blocked === null }
+  /** [分享] [訊息]：只把指令填進輸入框，由使用者按 Enter 送出 */
+  const quickButtons = (quick: BoardQuick) => (
+    <Box key={`board-quick-${quick.id}`} flexDirection="row" gap={1}>
+      {BOARD_QUICK_ACTIONS.map(a => (
+        <Button
+          key={`board-quick-${a.kind}-${quick.id}`}
+          label={a.text}
+          plain
+          onPress={() => press(() => fillBoardQuick($, `${a.command} ${quick.target} `, `${a.text}給${quick.who}`), `無法填入${a.text}指令`)}
+        />
+      ))}
+    </Box>
+  )
   const roomAction = (room: string, action: BoardRoomAction) =>
     !action.isLive ? (
       <Text key={`board-${action.kind}-off-${room}`} dimColor>
@@ -3378,6 +3405,7 @@ async function boardTab($: EngineInterface, { ui, cols, accent }: TabContext): P
                 <Text dimColor={isStale}>{r.label}</Text>
               </Button>
               <Box flexDirection="row" gap={1}>
+                {r.quick !== null && quickButtons(r.quick)}
                 {r.tail !== '' && (
                   <Text color={isStale ? undefined : 'green'} dimColor={isStale}>
                     {r.tail}
@@ -3393,7 +3421,10 @@ async function boardTab($: EngineInterface, { ui, cols, accent }: TabContext): P
           value: (
             <Box flexDirection="row" justifyContent="space-between" paddingLeft={4}>
               <Text dimColor={isStale || !r.isOnline}>{`${r.isOnline ? '●' : '○'} ${r.label}`}</Text>
-              {r.tag !== '' && <Text dimColor>{r.tag}</Text>}
+              <Box flexDirection="row" gap={1}>
+                {r.tag !== '' && <Text dimColor>{r.tag}</Text>}
+                {r.quick !== null && quickButtons(r.quick)}
+              </Box>
             </Box>
           ),
         },

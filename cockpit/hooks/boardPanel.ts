@@ -4,6 +4,7 @@
  */
 import type { BoardBlock, BoardFeed, BoardLink, BoardMember, BoardPanel, BoardRoom, BoardSub } from '../types'
 import { cleanText } from './cleanText'
+import { composeFill } from './fill'
 import { fitText, tabBar, textWidth } from './layout'
 import type { TabSegment } from './layout'
 
@@ -270,15 +271,45 @@ export type BoardRoomMarks = {
   acting: readonly string[]
   canJoin: boolean
   canLeave: boolean
+  /** 現在能不能用 [分享] [訊息]：連線正常、清單不是舊的 */
+  canQuick: boolean
 }
 
+/** 快速按鈕的對象：`target` 是指令裡的收件對象，`who` 是提示裡給人看的名稱 */
+export type BoardQuick = { id: string; target: string; who: string }
+
+/** 快速按鈕由左到右的順序。按下去只把指令填進輸入框，由使用者按 Enter 送出 */
+export const BOARD_QUICK_ACTIONS = [
+  { kind: 'share', text: '分享', command: '/trm-board:share' },
+  { kind: 'send', text: '訊息', command: '/trm-board:send' },
+] as const
+
+/** 兩顆快速按鈕佔的寬度（含前面的間隔） */
+const QUICK_WIDTH = BOARD_QUICK_ACTIONS.reduce((sum, a) => sum + textWidth(a.text) + 1, 0)
+
 export type BoardRoomRow =
-  | { kind: 'room'; id: string; room: string; label: string; tail: string; action: BoardRoomAction }
-  | { kind: 'member'; id: string; label: string; isOnline: boolean; tag: string }
+  | { kind: 'room'; id: string; room: string; label: string; tail: string; action: BoardRoomAction; quick: BoardQuick | null }
+  | { kind: 'member'; id: string; label: string; isOnline: boolean; tag: string; quick: BoardQuick | null }
 
 /** 成員顯示的名稱：有暱稱時是「使用者/暱稱」 */
 function memberName(m: BoardMember): string {
   return cleanText(m.nick === null || m.nick === '' ? m.session : `${userOfSession(m.session)}/${m.nick}`)
+}
+
+/** 上一則親手送出的指令：Claude Code 會把被 hook 攔下的 prompt 放回輸入框，送出後它還留在那裡 */
+const LEFTOVER_COMMAND = /^\s*\/trm-board:(send|share)(\s|$)/
+
+/** 快速按鈕要填什麼：輸入框留著上一則指令時整個換掉（接在後面會把舊內容再送一次），其他照共用的填入規則 */
+export const composeBoardQuick = (current: string, text: string) =>
+  LEFTOVER_COMMAND.test(current) ? { text, mode: 'replace' as const } : composeFill(current, text)
+
+/** 能不能放進收件對象：空白會結束對象、逗號分隔多人、冒號分隔聊天版，控制字元不該進到指令 */
+const isTargetWord = (word: string) => word !== '' && !/[\s\p{Cc}\p{Cf},:]/u.test(word)
+
+/** 這位成員的收件對象：優先用暱稱，暱稱不能當對象時用 session；都不行是 null */
+function memberTarget(room: string, m: BoardMember): string | null {
+  if (m.nick && isTargetWord(m.nick) && !m.nick.includes('/')) return `${room}:${userOfSession(m.session)}/${m.nick}`
+  return isTargetWord(m.session) ? `${room}:${m.session}` : null
 }
 
 function roomAction(room: string, isMine: boolean, marks: BoardRoomMarks): BoardRoomAction {
@@ -302,20 +333,27 @@ export function boardRoomRows(panel: BoardPanel, openRooms: readonly string[], c
     const isOpen = openRooms.includes(room.name)
     const fold = isOpen ? '▾ ' : '▸ '
     const action = roomAction(room.name, mine !== undefined, marks)
-    const nameWidth = cols - textWidth(fold) - textWidth(count) - 2 - (tail === '' ? 0 : textWidth(tail) + 1) - textWidth(action.text) - 1
+    // 同一個聊天版的成員才能互傳：沒進這個聊天版就沒有快速按鈕
+    const canQuick = marks.canQuick && mine !== undefined && isTargetWord(room.name)
+    const quick = canQuick ? { id: `room-${room.name}`, target: room.name, who: '全版' } : null
+    const nameWidth =
+      cols - textWidth(fold) - textWidth(count) - 2 - (tail === '' ? 0 : textWidth(tail) + 1) - textWidth(action.text) - 1 - (quick === null ? 0 : QUICK_WIDTH)
     const label = `${fold}${fitText(cleanText(room.name), Math.max(4, nameWidth))}  ${count}`
-    const head: BoardRoomRow = { kind: 'room', id: `board-line-${room.name}`, room: room.name, label, tail, action }
+    const head: BoardRoomRow = { kind: 'room', id: `board-line-${room.name}`, room: room.name, label, tail, action, quick }
     if (!isOpen) return [head]
     const members = room.members.map((m): BoardRoomRow => {
       const isHost = userOfSession(m.session) === room.host
       const tag = [...(isHost ? ['主持人'] : []), ...(m.session === self ? ['你'] : [])].join('·')
-      const memberWidth = cols - 6 - (tag === '' ? 0 : textWidth(tag) + 1)
+      const target = canQuick && m.online && m.session !== self ? memberTarget(room.name, m) : null
+      const memberQuick = target === null ? null : { id: `${room.name}-${m.session}`, target, who: memberName(m) }
+      const memberWidth = cols - 6 - (tag === '' ? 0 : textWidth(tag) + 1) - (memberQuick === null ? 0 : QUICK_WIDTH)
       return {
         kind: 'member',
         id: `board-member-${room.name}-${m.session}`,
         label: fitText(memberName(m), Math.max(4, memberWidth)),
         isOnline: m.online,
         tag,
+        quick: memberQuick,
       }
     })
     return [head, ...members]
