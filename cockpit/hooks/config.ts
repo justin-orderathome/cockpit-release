@@ -9,7 +9,7 @@ export type Settings = {
   toast?: number
   autoOpen: boolean
   /** 'last' 表示上次停的分頁 */
-  defaultTab: 'last' | Exclude<Tab, 'settings'>
+  defaultTab: 'last' | Exclude<Tab, 'settings' | 'board'>
   inlineRows: number
   /** 把 SKILL 的說明翻成繁體中文 */
   translate: boolean
@@ -23,11 +23,12 @@ export type Settings = {
   remoteRoadmap: boolean
 }
 
-/** 四個分頁：id、顯示名稱與快捷鍵 */
+/** 分頁：id、顯示名稱與快捷鍵。[討論版] 裝了 trm-board 才畫；[設定] 的快捷鍵維持 4 */
 export const TABS: readonly { id: Tab; label: string; hotkey: string }[] = [
   { id: 'tasks', label: '任務', hotkey: '1' },
   { id: 'basic', label: '基本', hotkey: '2' },
   { id: 'skill', label: 'SKILL', hotkey: '3' },
+  { id: 'board', label: '討論版', hotkey: '5' },
   { id: 'settings', label: '設定', hotkey: '4' },
 ]
 
@@ -63,10 +64,10 @@ export const FIELDS = [
     field: 'defaultTab',
     label: '預設分頁',
     fallback: 'last',
-    // [設定] 不能當預設分頁
+    // [設定] 不能當預設分頁；[討論版] 也不能（沒裝 trm-board 時沒有這一頁，要停回去用「上次停的」）
     options: [
       { value: 'last', label: '上次停的' },
-      ...TABS.filter(t => t.id !== 'settings').map(t => ({ value: t.id, label: t.label })),
+      ...TABS.filter(t => t.id !== 'settings' && t.id !== 'board').map(t => ({ value: t.id, label: t.label })),
     ],
   },
   { group: '面板', field: 'inlineRows', label: 'inline 行數', fallback: '8', options: ROWS.map(v => ({ value: v })) },

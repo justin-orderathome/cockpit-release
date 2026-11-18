@@ -66,7 +66,56 @@ export type TaskBoard = {
   earlySteps?: Record<string, ModelUse>
 }
 
-export type Tab = 'tasks' | 'basic' | 'skill' | 'settings'
+export type Tab = 'tasks' | 'basic' | 'skill' | 'board' | 'settings'
+
+/** [討論版] 的子分頁 */
+export type BoardSub = 'rooms' | 'sent' | 'received'
+
+/** 聊天版的一位成員：`session` 是「使用者/session」 */
+export type BoardMember = { session: string; online: boolean; nick: string | null }
+
+/** 開放中的聊天版；`host` 是主持人的使用者名稱 */
+export type BoardRoom = { name: string; host: string; members: BoardMember[] }
+
+/** 這個 session 和討論版的連線狀態 */
+export type BoardLink = 'online' | 'offline' | 'not_joined' | 'stopped' | 'lost'
+
+/** `board_panel` 讀到的、面板用得到的部分。分享是原始資料，只有算數量用到的欄位有解讀 */
+export type BoardPanel = {
+  user: string
+  /** 討論版伺服器的網址：分享網址的主機要和它相同才開；沒有回傳是 null */
+  server: string | null
+  /** 這個 session 進版用的名稱；沒進版是 null */
+  sessionName: string | null
+  link: BoardLink
+  /** `stopped` 時給人看的原因 */
+  linkReason: string | null
+  /** 啟動時有沒有帶討論版參數：沒有就進不了版 */
+  hasChannel: boolean
+  rooms: BoardRoom[]
+  /** 伺服器太舊或沒查到時是 null */
+  shares: { sent: Record<string, unknown>[]; received: Record<string, unknown>[] } | null
+  /** 伺服器確定不支援分享清單（`shares_supported` 是 false）；沒查不算 */
+  isServerOld: boolean
+}
+
+/** 版本或設定不對、整個分頁都用不了的情況；分頁改顯示說明與下一步 */
+export type BoardBlock = 'old-client' | 'no-mcp' | 'not-registered' | 'unknown-format'
+
+/** 這個 session 讀到的討論版：上次讀到的清單留著，讀取失敗時照樣顯示 */
+export type BoardFeed = {
+  /** 用不了的原因；有值時不顯示清單 */
+  block: BoardBlock | null
+  panel: BoardPanel | null
+  /** 上次讀到清單的時刻（毫秒） */
+  readAt: number | null
+  /** 最近一次讀取失敗的原因；成功就清掉 */
+  failure: string | null
+  /** 這次失敗是伺服器拒絕這個 client：`failure` 是它給的原因與下一步，重試沒有用 */
+  isStopped: boolean
+  /** 還沒有清單、正在讀第一次 */
+  isReading: boolean
+}
 
 /** [任務] 裡的子分頁 */
 export type Subtab = 'roadmap' | 'tasks' | 'background'
@@ -442,6 +491,22 @@ declare module 'claude-code' {
       tutorialMenu: boolean
       /** 正在看哪一個 skill 的用法頁（完整名稱）；'' 表示在列表 */
       howtoPage: string
+      /** [討論版] 讀到的清單與讀取狀態 */
+      boardFeed: BoardFeed
+      /** [討論版] 正在看的子分頁 */
+      boardSub: BoardSub
+      /** [討論版] 展開成員的聊天版 */
+      boardOpenRooms: string[]
+      /** [討論版] 按了 [加入]、還在等的聊天版 */
+      boardJoining: string[]
+      /** [討論版] 還沒做完的動作（`boardActionKey`） */
+      boardActing: string[]
+      /** [討論版] 收起來的使用者組（預設展開）：`子分頁:使用者` */
+      boardClosedGroups: string[]
+      /** [討論版] 展開的分享列（預設收合）：`子分頁:使用者/分享` */
+      boardOpenShares: string[]
+      /** [討論版] 按過第一下、等第二下確認的按鈕；'' 表示沒有 */
+      boardArmed: string
     }
   }
 }

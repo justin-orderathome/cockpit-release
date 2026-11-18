@@ -52,11 +52,14 @@ export function storedTranslations(value: unknown): Translations {
   return kept
 }
 
-/** 開場停在哪個分頁：設定指定的那一個；設成「上次」時用存起來的，沒有、不認得或是 [設定] 就回到 [任務] */
-export function startTab(defaultTab: Settings['defaultTab'], last: unknown): Tab {
+/**
+ * 開場停在哪個分頁：設定指定的那一個；設成「上次」時用存起來的，沒有、不認得或是 [設定] 就回到 [任務]。
+ * 上次停在 [討論版] 但 trm-board 已經移除（`hasBoard` 是 false）時也回到 [任務]
+ */
+export function startTab(defaultTab: Settings['defaultTab'], last: unknown, hasBoard = false): Tab {
   if (defaultTab !== 'last') return defaultTab
   const known = TABS.find(t => t.id === last)?.id
-  return known !== undefined && known !== 'settings' ? known : 'tasks'
+  return known !== undefined && known !== 'settings' && (known !== 'board' || hasBoard) ? known : 'tasks'
 }
 
 /** 按了「重新載入 mod」之後多久內的 session.start 算是它造成的（毫秒） */

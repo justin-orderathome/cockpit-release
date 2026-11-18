@@ -3,6 +3,9 @@ import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type {
   BackgroundList,
+  BoardBlock,
+  BoardFeed,
+  BoardSub,
   CommandEntry,
   Decision,
   Effort,
@@ -30,6 +33,35 @@ import {
   viewBackground,
 } from './background'
 import type { SnapshotCron, SnapshotTask } from './background'
+import {
+  BOARD_BLOCK_TEXT,
+  BOARD_PANEL_TOOL,
+  BOARD_PLUGIN,
+  BOARD_UPDATE_COMMAND,
+  NO_FEED,
+  BOARD_JOIN_COMMAND,
+  boardActionKey,
+  boardCounts,
+  boardOutcome,
+  boardReply,
+  boardRoomRows,
+  boardSharesNotice,
+  boardSubBar,
+  clockText,
+  changesBoard,
+  feedAfter,
+  isFetchUnsettled,
+  isInRoom,
+  isJoinableName,
+  joinBlock,
+  replyFailure,
+  feedReading,
+  toolsBlock,
+} from './boardPanel'
+import type { BoardAction, BoardReply, BoardRoomAction } from './boardPanel'
+import { SENT_DETAIL_INDENT, fetchedNotice, receivedRows, sentRows } from './boardShares'
+import type { ShareButton } from './boardShares'
+import { isBoardShareUrl } from './boardShareUrl'
 import { NO_CHANGELOG, changelogIn } from './changelog'
 import { FIELDS, TABS, changedFields, parseSettings, rawValues, resetLabel } from './config'
 import type { Field, Settings } from './config'
@@ -41,11 +73,12 @@ import { boardAfter, handledAfter, stepBoard } from './board'
 import type { BoardState, BoardStep } from './board'
 import { applyHandled, handledTickets, handlerMarks, mayNameTicket } from './handled'
 import type { Handled, HandledEvent } from './handled'
+import { cleanText } from './cleanText'
 import { dateOf, ranShell, reasonOf, succeeded, wroteFile } from './events'
 import { howtoCount, howtoItems, howtoReport, makeHowtos, storedHowtos, withoutStale } from './howto'
 import type { HowtoRound, HowtoRun, Howtos } from './howto'
 import { viewHowtoPage } from './howtoPage'
-import { ROW_GAP, TOKEN_CELLS, chrome, fitText, foldLabel, footPlan, footWidth, gridRows, gridSlots, layout, tabBar as tabBarOf, tailWidth, textWidth } from './layout'
+import { ROW_GAP, TOKEN_CELLS, chrome, fitText, foldLabel, footPlan, footWidth, gridRows, gridSlots, layout, tabBar as tabBarOf, tailWidth, textWidth, wrapText } from './layout'
 import type { Row } from './layout'
 import { sessionMemory } from './memory'
 import type { Reload } from './memory'
@@ -189,8 +222,24 @@ const background = atom({ plugin: 'cockpit', key: 'background' } as const, EMPTY
 const backgroundOlderOpen = atom({ plugin: 'cockpit', key: 'backgroundOlderOpen' } as const, false)
 const pages = atom(
   { plugin: 'cockpit', key: 'pages' } as const,
-  { tasks: 0, basic: 0, skill: 0, settings: 0 } as Record<Tab, number>,
+  { tasks: 0, basic: 0, skill: 0, board: 0, settings: 0 } as Record<Tab, number>,
 )
+/** [討論版] 讀到的清單與讀取狀態：各 session 各讀各的，只記這個 session */
+const boardFeed = atom({ plugin: 'cockpit', key: 'boardFeed' } as const, NO_FEED as BoardFeed)
+/** [討論版] 正在看的子分頁 */
+const boardSub = atom({ plugin: 'cockpit', key: 'boardSub' } as const, 'rooms' as BoardSub)
+/** [討論版] 展開成員的聊天版 */
+const boardOpenRooms = atom({ plugin: 'cockpit', key: 'boardOpenRooms' } as const, [] as string[])
+/** [討論版] 按了 [加入]、還在等的聊天版 */
+const boardJoining = atom({ plugin: 'cockpit', key: 'boardJoining' } as const, [] as string[])
+/** [討論版] 還沒做完的動作 */
+const boardActing = atom({ plugin: 'cockpit', key: 'boardActing' } as const, [] as string[])
+/** [討論版] 收起來的使用者組（預設展開） */
+const boardClosedGroups = atom({ plugin: 'cockpit', key: 'boardClosedGroups' } as const, [] as string[])
+/** [討論版] 展開的分享列（預設收合） */
+const boardOpenShares = atom({ plugin: 'cockpit', key: 'boardOpenShares' } as const, [] as string[])
+/** [討論版] 按過第一下、等第二下確認的按鈕；'' 表示沒有 */
+const boardArmed = atom({ plugin: 'cockpit', key: 'boardArmed' } as const, '')
 const prompts = atom({ plugin: 'cockpit', key: 'prompts' } as const, [] as PromptGroup[])
 const hasProjectPrompts = atom({ plugin: 'cockpit', key: 'hasProjectPrompts' } as const, false)
 const closedPromptGroups = atom({ plugin: 'cockpit', key: 'closedPromptGroups' } as const, [] as string[])
@@ -452,6 +501,7 @@ async function checkTaskTools($: EngineInterface) {
 
 /** 以 slash command 切換，完成後更新顯示。 */
 async function switchTo($: EngineInterface, command: 'model' | 'effort', value: string) {
+  await disarmBoard($)
   await commit($, { switching: command })
   try {
     await $.command.run({ command, args: value })
@@ -1223,12 +1273,242 @@ async function currentBranch($: EngineInterface): Promise<string | undefined> {
  */
 async function setTab($: EngineInterface, next: Tab) {
   // 離開用法頁；[任務] 的子分頁不動，回來時停在上次看的那一個
-  const writes = await Promise.all([planWrites($, { tab: next }), howtoCloseWrites($)])
+  const writes = await Promise.all([planWrites($, { tab: next }), howtoCloseWrites($), disarmWrites($)])
   await writeAll(writes.flat())
   if (next !== 'settings') await $.store.set('lastTab', next)
   if (next === 'tasks') await roadmapChanged($, { kind: 'open' })
   if (next === 'basic') await loadPrompts($)
   if (next === 'skill') await loadSkills($)
+  // 工具可能要等很久，不留在這裡等（引擎的 hook 有 10 秒上限）
+  if (next === 'board') pressed($, readBoard($), '無法讀取討論版')
+}
+
+// ── 討論版 ───────────────────────────────────────────────
+
+/** 最新一次讀取的序號：同時有好幾次在讀時，只用最後按的那一次的結果 */
+let boardReadNo = 0
+
+/** 這個 session 的工具清單說分頁用不了的原因。查不到清單不算版本不一致，交給 `board_panel` 的結果決定 */
+async function boardToolsBlock($: EngineInterface): Promise<BoardBlock | null> {
+  try {
+    return toolsBlock((await $.tool.list()).map(t => t.name))
+  } catch (err) {
+    $.ui.log(`查討論版工具失敗：${reasonOf(err)}`, { to: 'debug' })
+    return null
+  }
+}
+
+/**
+ * 呼叫 `board_panel` 讀一次，結果寫進 `boardFeed`。只在切到分頁與按 `r` 時呼叫：開場不連線、不輪詢。
+ * 讀不到時留著舊清單，寫 debug log 並用 toast 說明原因（R-03）
+ */
+async function readBoard($: EngineInterface) {
+  const no = ++boardReadNo
+  if (changes(await read($, boardFeed), feedReading)) await update($, boardFeed, feedReading)
+  const block = await boardToolsBlock($)
+  const reply: BoardReply =
+    block !== null
+      ? { ok: false, block }
+      : await $.tool.call({ tool: BOARD_PANEL_TOOL } as never).then(boardReply, (err: unknown) => ({ ok: false as const, reason: reasonOf(err) }))
+  if (no !== boardReadNo) return
+  if (!reply.ok && 'reason' in reply) {
+    $.ui.log(`讀取討論版失敗：${reply.reason}`, { to: 'debug' })
+    // 伺服器拒絕這個 client 是持續的狀態，畫面上已經寫了原因與下一步
+    if (reply.isStopped !== true) $.ui.toast(`無法讀取討論版：${reply.reason}`)
+  }
+  await applyBoardReply($, reply)
+}
+
+/**
+ * 讀到的結果寫上畫面：清單與「等待加入…」一起寫，只重繪一次。
+ * 已經進版的、以及模組重載後沒有人在等的聊天版，就不再標等待
+ */
+async function applyBoardReply($: EngineInterface, reply: BoardReply, also: readonly Write[] = []) {
+  const [now, joining] = await Promise.all([$.clock.now(), read($, boardJoining)])
+  const stillWaiting = joining.filter(room => boardJoins.has(room) && !(reply.ok && isInRoom(reply.panel, room)))
+  for (const room of joining) if (!stillWaiting.includes(room)) boardJoins.delete(room)
+  // 讀取失敗時會改資料的按鈕都停用：恢復之後不該還停在「確定…？」
+  const disarm = reply.ok ? [] : await disarmWrites($)
+  await writeAll([
+    () => update($, boardFeed, feed => feedAfter(feed, reply, now)),
+    ...(stillWaiting.length === joining.length ? [] : [() => update($, boardJoining, list => list.filter(r => stillWaiting.includes(r)))]),
+    ...disarm,
+    ...also,
+  ])
+}
+
+/** 面板正在顯示 [討論版]：沒開著的 session 不連線 */
+async function isBoardShown($: EngineInterface) {
+  const [chosen, panes] = await Promise.all([read($, tab), $.ui.panes()])
+  return chosen === 'board' && panes.some(p => p.id === PANE && p.isShown)
+}
+
+/** 清單可能變了：分頁開著才重讀 */
+async function boardChanged($: EngineInterface) {
+  if (await isBoardShown($)) await readBoard($)
+}
+
+/** agent 的討論版工具做完：清單真的可能變了才重讀，不在 hook 裡等（引擎的 hook 有 10 秒上限） */
+function boardToolDone($: EngineInterface, call: object, ran: Parameters<typeof succeeded>[0]) {
+  if (succeeded(ran) && changesBoard(call)) pressed($, boardChanged($), '無法讀取討論版')
+}
+
+/**
+ * 按了 [加入] 的聊天版。`$.command.run` 在輪到指令、那一輪開始時才解析（實測，忙碌時要等前一輪結束），
+ * 所以 `queued` 的還沒開始，一輪結束只算 `started` 的。每按一次是一筆：按 `r` 放棄之後再按，舊指令的結果不算到新的這筆
+ */
+const boardJoins = new Map<string, { phase: 'queued' | 'started' }>()
+
+/** 等待結束：分頁開著就重讀（清單與等待一起換），沒開著只拿掉等待 */
+async function settleBoardJoins($: EngineInterface, rooms: readonly string[]) {
+  for (const room of rooms) boardJoins.delete(room)
+  if (await isBoardShown($)) return readBoard($)
+  await update($, boardJoining, list => list.filter(r => !rooms.includes(r)))
+}
+
+/** 主對話一輪結束：開始跑的加入都有結果了。沒有在等時不做任何事 */
+function boardTurnEnded($: EngineInterface) {
+  const started = [...boardJoins].flatMap(([room, press]) => (press.phase === 'started' ? [room] : []))
+  if (started.length > 0) pressed($, settleBoardJoins($, started), '無法讀取討論版')
+}
+
+/**
+ * [加入]：只帶聊天版送出 `/trm-board:join`，暱稱由 skill 的原生選單問。
+ * 不等指令跑完（可能排隊很久，引擎的 hook 有 10 秒上限）。取消、撞名的原因由對話區的 skill 顯示
+ */
+async function joinBoardRoom($: EngineInterface, room: string) {
+  if (boardJoins.has(room)) return
+  if (!isJoinableName(room)) return void $.ui.toast(`無法加入：聊天版名稱「${cleanText(room)}」有不能用的字元`)
+  const press: { phase: 'queued' | 'started' } = { phase: 'queued' }
+  const isCurrent = () => boardJoins.get(room) === press
+  boardJoins.set(room, press)
+  await update($, boardJoining, list => [...list.filter(r => r !== room), room])
+  void $.command.run({ command: BOARD_JOIN_COMMAND, args: room }).then(
+    ran => {
+      if (!isCurrent()) return
+      // 指令直接回了文字：沒有開新的一輪，不會有 turn.complete
+      if (ran.text !== undefined) return pressed($, settleBoardJoins($, [room]), '無法讀取討論版')
+      press.phase = 'started'
+    },
+    (err: unknown) => {
+      $.ui.log(`加入聊天版 ${room} 失敗：${reasonOf(err)}`, { to: 'debug' })
+      $.ui.toast(`無法加入聊天版：${reasonOf(err)}`)
+      if (isCurrent()) pressed($, settleBoardJoins($, [room]), '無法讀取討論版')
+    },
+  )
+}
+
+/**
+ * 按 `r`：不再等還沒結果的 [加入]，馬上恢復，再重讀。這是卡住時的出口，所以不等讀取回來才清。
+ * 選單開著時按了 `r`、之後真的進版，由 agent 工具的重讀更新畫面
+ */
+async function reloadBoard($: EngineInterface) {
+  boardJoins.clear()
+  if ((await read($, boardJoining)).length > 0) await update($, boardJoining, () => [])
+  await readBoard($)
+}
+
+/** 還在跑的動作；有重疊時各自回傳的清單不一定是最後的狀態，全部做完再讀一次 */
+const boardActs = new Set<string>()
+let isBoardActOverlapped = false
+
+/**
+ * 面板的動作共用這一條：帶 `action` 呼叫 `board_panel`，用回傳的資料更新畫面。
+ * `conflict` 表示狀態已經被別人改了，照新資料重繪就好；其他失敗寫 debug log 並用 toast 說明（`what` 是「無法…」）。
+ * 同一個動作做完之前再按不會送第二次
+ */
+async function boardAct($: EngineInterface, action: BoardAction, what: string) {
+  const key = boardActionKey(action)
+  if (boardActs.has(key)) return
+  if (boardActs.size > 0) isBoardActOverlapped = true
+  boardActs.add(key)
+  // 動作開始前後發出的讀取，結果都可能比動作舊
+  boardReadNo++
+  await update($, boardActing, list => [...list, key])
+  const ran: Parameters<typeof boardReply>[0] & { isCut?: boolean } = await $.tool.call({ tool: BOARD_PANEL_TOOL, ...action } as never).then(
+    answer => answer as Parameters<typeof boardReply>[0],
+    (err: unknown) => ({ deny: reasonOf(err), isCut: true }),
+  )
+  boardActs.delete(key)
+  boardReadNo++
+  const finished = () => update($, boardActing, list => list.filter(k => k !== key))
+  if (isFetchUnsettled(action, ran)) {
+    // 不是失敗：bridge 會繼續下載，下次讀取時依 `downloaded` 顯示實際狀態。手上沒有新清單，畫面照舊
+    $.ui.log(`下載 ${key} 沒等到結果：${reasonOf(ran.deny ?? ran.text ?? 'MCP 回報錯誤')}`, { to: 'debug' })
+    $.ui.toast('下載還在背景進行，稍後按 r 重新整理查看結果')
+    await finished()
+  } else {
+    const reply = boardReply(ran)
+    const outcome = boardOutcome(ran, reply)
+    const failure = outcome.kind === 'failed' ? outcome.reason : replyFailure(reply)
+    if (failure !== undefined) {
+      const said = `${outcome.kind === 'failed' ? what : '無法讀取討論版'}：${failure}`
+      $.ui.log(said, { to: 'debug' })
+      // 動作本身沒失敗、只是伺服器拒絕這個 client：畫面上已經寫了原因
+      if (outcome.kind === 'failed' || reply.ok || !('isStopped' in reply)) $.ui.toast(said)
+    }
+    // 下載完成：路徑與不可信的提醒要看得到，所以展開該列
+    const fetched = action.action === 'fetch' && outcome.kind === 'done' && reply.ok ? fetchedNotice(reply.panel.shares?.received ?? [], action.share) : null
+    if (fetched !== null) $.ui.toast(fetched.text)
+    const reveal = fetched === null ? [] : [() => update($, boardOpenShares, list => (list.includes(fetched.openId) ? list : [...list, fetched.openId]))]
+    await applyBoardReply($, reply, [finished, ...reveal])
+  }
+  if (boardActs.size === 0 && isBoardActOverlapped) {
+    isBoardActOverlapped = false
+    await boardChanged($)
+  }
+}
+
+/** 開啟別人的分享：網址要先通過驗證才交給瀏覽器，`explorer.exe` 收到本機路徑會開啟或執行那個檔案 */
+async function openBoardShare($: EngineInterface, url: unknown, server: string | null) {
+  if (!isBoardShareUrl(url, server)) {
+    $.ui.log('分享網址沒有通過驗證，不開啟', { to: 'debug' })
+    return void $.ui.toast('無法開啟：這不是討論版伺服器上的分享網址')
+  }
+  await openInBrowser($, url)
+}
+
+/** [開啟資料夾]：只開 bridge 回報的收件匣資料夾，確認是真的資料夾（不是檔案或連結）才交給檔案總管，argv 不經 shell（R-01） */
+async function openBoardFolder($: EngineInterface, path: string) {
+  const found = await $.fs.stat(path).catch((err: unknown) => {
+    $.ui.log(`openBoardFolder：${reasonOf(err)}`, { to: 'debug' })
+    return undefined
+  })
+  if (found?.kind !== 'dir' || found.isLink) return void $.ui.toast('無法開啟資料夾：下載的位置不是資料夾')
+  try {
+    const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+    await $.process.run(isWindows ? ['explorer.exe', path] : ['xdg-open', path])
+  } catch (err) {
+    $.ui.log(`openBoardFolder：${reasonOf(err)}`, { to: 'debug' })
+    $.ui.toast(`無法開啟資料夾：${reasonOf(err)}`)
+  }
+}
+
+/** 取消等待確認的按鈕要寫什麼；沒有在等時不寫 */
+async function disarmWrites($: EngineInterface): Promise<Write[]> {
+  return (await read($, boardArmed)) === '' ? [] : [() => update($, boardArmed, () => '')]
+}
+
+/** 按了別的地方：等待確認的按鈕恢復原狀 */
+async function disarmBoard($: EngineInterface) {
+  await writeAll(await disarmWrites($))
+}
+
+/**
+ * 要按兩下才生效的按鈕：第一下只記下 `armId`（按鈕變成「確定…？」），同一顆再按一下才執行 `run`。
+ * 不用計時器：按別的地方由 `disarmBoard` 取消，按另一顆要確認的按鈕就換成等那一顆
+ */
+async function confirmPress($: EngineInterface, armId: string, run: () => Promise<unknown>) {
+  if ((await read($, boardArmed)) !== armId) return void (await update($, boardArmed, () => armId))
+  await update($, boardArmed, () => '')
+  await run()
+}
+
+/** 換 [討論版] 的子分頁：從第一頁看起，子分頁與頁碼一起寫 */
+async function pickBoardSub($: EngineInterface, next: BoardSub) {
+  const shown = await read($, pages)
+  const top = (ps: Record<Tab, number>) => ({ ...ps, board: 0 })
+  await writeAll([() => update($, boardSub, () => next), ...(changes(shown, top) ? [() => update($, pages, top)] : [])])
 }
 
 /**
@@ -1445,8 +1725,8 @@ async function toggleEffort($: EngineInterface, name: string) {
 /** 翻頁；`unfollows` 是在「任務」子分頁翻的（停止自動跟隨，和翻頁一起寫） */
 async function turnPage($: EngineInterface, current: Tab, to: number, unfollows: boolean) {
   const turned = (ps: Record<Tab, number>) => ({ ...ps, [current]: Math.max(0, to) })
-  const [shown, follow] = await Promise.all([read($, pages), unfollows ? taskWrites($, { task: { kind: 'unfollow' } }) : []])
-  await writeAll([...(changes(shown, turned) ? [() => update($, pages, turned)] : []), ...follow])
+  const [shown, follow, disarm] = await Promise.all([read($, pages), unfollows ? taskWrites($, { task: { kind: 'unfollow' } }) : [], disarmWrites($)])
+  await writeAll([...(changes(shown, turned) ? [() => update($, pages, turned)] : []), ...follow, ...disarm])
 }
 
 /** 換 [任務] 的子分頁：從新那一頁的第一頁看起；子分頁與頁碼一起寫，只重繪一次 */
@@ -2990,7 +3270,338 @@ async function settingsTab($: EngineInterface, { ui, indicator }: TabContext): P
   return { actions, actionsWidth, status, statusWidth, rows }
 }
 
+/** [討論版] 分頁：聊天版、我分享的、別人分享的三個子分頁；資料是上次讀到的，要最新的按 `r` */
+async function boardTab($: EngineInterface, { ui, cols, accent }: TabContext): Promise<TabContent> {
+  const { Box, Text, Button } = ui
+  const [feed, chosen, openRooms, joining, acting, closedGroups, openShares, armed] = await Promise.all([
+    read($, boardFeed),
+    read($, boardSub),
+    read($, boardOpenRooms),
+    read($, boardJoining),
+    read($, boardActing),
+    read($, boardClosedGroups),
+    read($, boardOpenShares),
+    read($, boardArmed),
+  ])
+  const { panel, readAt, failure, isReading } = feed
+  /** 這一頁一般的按鈕：按下去先取消等待確認的按鈕，再做自己的事 */
+  const press = (job: () => Promise<unknown>, what: string) => pressed($, disarmBoard($).then(job), what)
+  const actions = (
+    <Box key="board-actions" flexDirection="row" gap={2}>
+      <Button key="board-reload" label="重新整理" plain hotkey="r" onPress={() => press(() => reloadBoard($), '無法讀取討論版')} />
+    </Box>
+  )
+  const actionsWidth = footWidth([{ hotkey: 'r', label: '重新整理' }])
+  const textRows = (id: string, text: string, color?: string): Row<JSX.Element>[] =>
+    wrapText(text, cols).map((line, i) => ({
+      id: `${id}-${i}`,
+      value: (
+        <Text color={color} dimColor={color === undefined}>
+          {line}
+        </Text>
+      ),
+    }))
+
+  // 版本或設定不對：框內只有說明與下一步
+  if (feed.block !== null) {
+    const { text, next } = BOARD_BLOCK_TEXT[feed.block]
+    const rows = [...textRows('board-block', text, 'yellow'), ...textRows('board-block-next', next)]
+    if (feed.block !== 'old-client') return { actions, actionsWidth, rows }
+    const withUpdate = (
+      <Box key="board-block-actions" flexDirection="row" gap={2}>
+        <Button key="board-update" label="更新" plain hotkey="u" onPress={() => pressed($, fillPrompt($, BOARD_UPDATE_COMMAND, '更新 trm-board'), '無法填入更新指令')} />
+        {actions}
+      </Box>
+    )
+    return { actions: withUpdate, actionsWidth: actionsWidth + footWidth([{ hotkey: 'u', label: '更新' }]) + 2, rows }
+  }
+
+  // 從沒讀到資料：框內只有原因與下一步
+  if (panel === null) {
+    if (failure === null) return { actions, actionsWidth, rows: [], emptyText: isReading ? '讀取討論版中…' : '按 r 讀取討論版' }
+    if (feed.isStopped) return { actions, actionsWidth, rows: textRows('board-stopped', failure, 'yellow') }
+    return { actions, actionsWidth, rows: [...textRows('board-failure', `讀不到討論版：${failure}`, 'red'), ...textRows('board-next', '確認連線後按 r 重試')] }
+  }
+
+  const isStale = failure !== null
+  const counts = boardCounts(panel, readAt ?? 0)
+  const bar = boardSubBar(chosen, counts, cols)
+  const top = (
+    <Box key="board-subs" flexDirection="row">
+      {bar.segments.map(s =>
+        s.kind === 'sep' ? (
+          <Text key={`board-sub-sep-${s.id}`} dimColor>
+            {s.text}
+          </Text>
+        ) : s.kind === 'current' ? (
+          <Box key={`board-sub-${s.id}`}>
+            <Text bold color={accent}>
+              {s.text}
+            </Text>
+          </Box>
+        ) : (
+          <Button key={`board-sub-${s.id}`} label={s.text} plain hotkey={s.hotkey} onPress={() => press(() => pickBoardSub($, s.id), '無法切換子分頁')} />
+        ),
+      )}
+    </Box>
+  )
+
+  const blocked = joinBlock(panel)
+  const marks = { joining, acting, canJoin: !isStale && blocked === null, canLeave: !isStale }
+  const roomAction = (room: string, action: BoardRoomAction) =>
+    !action.isLive ? (
+      <Text key={`board-${action.kind}-off-${room}`} dimColor>
+        {action.text}
+      </Text>
+    ) : action.kind === 'join' ? (
+      <Button key={`board-join-${room}`} label={action.text} plain onPress={() => press(() => joinBoardRoom($, room), '無法加入聊天版')} />
+    ) : (
+      <Button
+        key={`board-leave-${room}`}
+        label={action.text}
+        plain
+        onPress={() => press(() => boardAct($, { action: 'leave', room }, '無法離開聊天版'), '無法離開聊天版')}
+      />
+    )
+  const roomRows = boardRoomRows(panel, openRooms, cols, marks).map((r): Row<JSX.Element> =>
+    r.kind === 'room'
+      ? {
+          id: r.id,
+          value: (
+            <Box flexDirection="row" justifyContent="space-between">
+              <Button
+                key={`board-room-${r.room}`}
+                label={r.label}
+                plain
+                onPress={() => press(() => update($, boardOpenRooms, list => toggled(list, r.room)), '無法展開聊天版')}
+              >
+                <Text dimColor={isStale}>{r.label}</Text>
+              </Button>
+              <Box flexDirection="row" gap={1}>
+                {r.tail !== '' && (
+                  <Text color={isStale ? undefined : 'green'} dimColor={isStale}>
+                    {r.tail}
+                  </Text>
+                )}
+                {roomAction(r.room, r.action)}
+              </Box>
+            </Box>
+          ),
+        }
+      : {
+          id: r.id,
+          value: (
+            <Box flexDirection="row" justifyContent="space-between" paddingLeft={4}>
+              <Text dimColor={isStale || !r.isOnline}>{`${r.isOnline ? '●' : '○'} ${r.label}`}</Text>
+              {r.tag !== '' && <Text dimColor>{r.tag}</Text>}
+            </Box>
+          ),
+        },
+  )
+  /** 要按兩下才生效的按鈕：第一下變紅底的「確定…？」，第二下才執行 */
+  const confirmButton = (b: ShareButton) =>
+    b.state === 'busy' || b.state === 'off' ? (
+      <Text key={`${b.armId}-off`} dimColor>
+        {b.text}
+      </Text>
+    ) : (
+      <Button key={b.armId} label={b.text} plain onPress={() => pressed($, confirmPress($, b.armId, () => boardAct($, b.action, b.what)), b.what)}>
+        {b.state === 'armed' ? (
+          <Text bold color="white" backgroundColor="red">
+            {b.text}
+          </Text>
+        ) : (
+          <Text color="red">{b.text}</Text>
+        )}
+      </Button>
+    )
+  const shareRows = (panel.shares === null ? [] : sentRows(panel.shares.sent, readAt ?? 0, cols, { armed, acting, canAct: !isStale, closedGroups, openShares })).map(
+    (r): Row<JSX.Element> => {
+      if (r.kind === 'group')
+        return {
+          id: r.id,
+          value: (
+            <Button
+              key={`board-fold-${r.foldId}`}
+              label={r.label}
+              plain
+              onPress={() => press(() => update($, boardClosedGroups, list => toggled(list, r.foldId)), '無法展開分組')}
+            >
+              <Text bold={!r.isDim} dimColor={isStale || r.isDim}>
+                {r.label}
+              </Text>
+            </Button>
+          ),
+        }
+      if (r.kind === 'share') {
+        const isDim = isStale || r.status.tone === 'ended'
+        return {
+          id: r.id,
+          value: (
+            <Box flexDirection="row" justifyContent="space-between">
+              <Button
+                key={`board-fold-${r.foldId}`}
+                label={r.label}
+                plain
+                onPress={() => press(() => update($, boardOpenShares, list => toggled(list, r.foldId)), '無法展開分享')}
+              >
+                <Text dimColor={isDim}>{r.label}</Text>
+              </Button>
+              <Box flexDirection="row" gap={1}>
+                {r.tail !== '' && (
+                  <Text color={r.status.tone === 'warn' && !isStale ? 'yellow' : undefined} dimColor={r.status.tone !== 'warn' || isStale}>
+                    {r.tail}
+                  </Text>
+                )}
+                {r.button !== null && confirmButton(r.button)}
+              </Box>
+            </Box>
+          ),
+        }
+      }
+      if (r.kind === 'detail')
+        return {
+          id: r.id,
+          value: (
+            <Box paddingLeft={SENT_DETAIL_INDENT}>
+              <Text dimColor>{r.text}</Text>
+            </Box>
+          ),
+        }
+      return {
+        id: r.id,
+        value: (
+          <Box flexDirection="row" justifyContent="flex-end">
+            {confirmButton(r.button)}
+          </Box>
+        ),
+      }
+    },
+  )
+  const received = panel.shares === null ? [] : receivedRows(panel.shares.received, readAt ?? 0, cols, { armed, acting, canAct: !isStale, closedGroups, openShares })
+  const receivedShareRows = received.map((r): Row<JSX.Element> => {
+    if (r.kind === 'group')
+      return {
+        id: r.id,
+        value: (
+          <Box flexDirection="row" justifyContent="space-between">
+            <Button
+              key={`board-fold-${r.foldId}`}
+              label={r.label}
+              plain
+              onPress={() => press(() => update($, boardClosedGroups, list => toggled(list, r.foldId)), '無法展開分組')}
+            >
+              <Text bold={!r.isDim} dimColor={isStale || r.isDim}>
+                {r.label}
+              </Text>
+            </Button>
+            <Text color={r.isOnline && !isStale ? 'green' : undefined} dimColor={!r.isOnline || isStale}>
+              {r.isOnline ? '● 在線' : '○ 離線'}
+            </Text>
+          </Box>
+        ),
+      }
+    if (r.kind === 'share') {
+      const isDim = isStale || r.status.tone === 'ended'
+      const open = () => press(() => openBoardShare($, r.url, panel.server), '無法開啟分享')
+      const fetch = r.fetch
+      return {
+        id: r.id,
+        value: (
+          <Box flexDirection="row" justifyContent="space-between">
+            <Box flexDirection="row">
+              <Button
+                key={`board-fold-${r.foldId}`}
+                label={r.fold}
+                plain
+                onPress={() => press(() => update($, boardOpenShares, list => toggled(list, r.foldId)), '無法展開分享')}
+              >
+                <Text dimColor={isDim}>{r.fold}</Text>
+              </Button>
+              {r.canOpen ? (
+                <Button key={`board-row-${r.rowId}`} label={r.label} plain onPress={open}>
+                  <Text dimColor={isDim}>{r.label}</Text>
+                </Button>
+              ) : (
+                <Text key={`board-row-off-${r.rowId}`} dimColor={isDim}>
+                  {r.label}
+                </Text>
+              )}
+            </Box>
+            <Box flexDirection="row" gap={1}>
+              {r.tail !== '' && (
+                <Text color={r.status.tone === 'warn' && !isStale ? 'yellow' : undefined} dimColor={r.status.tone !== 'warn' || isStale}>
+                  {r.tail}
+                </Text>
+              )}
+              {r.hasActions &&
+                (r.canOpen ? (
+                  <Button key={`board-open-${r.rowId}`} label="開啟" plain onPress={open} />
+                ) : (
+                  <Text key={`board-open-off-${r.rowId}`} dimColor>
+                    開啟
+                  </Text>
+                ))}
+              {fetch !== null &&
+                (fetch.kind === 'again' ? (
+                  confirmButton(fetch.button)
+                ) : fetch.isLive ? (
+                  <Button key={`board-fetch-${r.rowId}`} label={fetch.text} plain onPress={() => press(() => boardAct($, fetch.action, '無法下載'), '無法下載')} />
+                ) : (
+                  <Text key={`board-fetch-off-${r.rowId}`} dimColor>
+                    {fetch.text}
+                  </Text>
+                ))}
+            </Box>
+          </Box>
+        ),
+      }
+    }
+    if (r.kind === 'detail')
+      return {
+        id: r.id,
+        value: (
+          <Box paddingLeft={SENT_DETAIL_INDENT}>
+            <Text color={r.isWarning ? 'yellow' : undefined} dimColor={!r.isWarning}>
+              {r.text}
+            </Text>
+          </Box>
+        ),
+      }
+    return {
+      id: r.id,
+      value: (
+        <Box flexDirection="row" justifyContent="flex-end">
+          <Button key={`board-folder-${r.rowId}`} label="開啟資料夾" plain onPress={() => press(() => openBoardFolder($, r.path), '無法開啟資料夾')} />
+        </Box>
+      ),
+    }
+  })
+  const emptyText =
+    chosen === 'rooms' ? '目前沒有開放中的聊天版' : chosen === 'sent' ? '你還沒有分享任何檔案，可以用 /trm-board:share 分享' : '還沒有人分享檔案給你'
+  const sharesNotice = boardSharesNotice(panel)
+  const joinNotice = blocked === null || isStale ? [] : textRows('board-join-block', blocked, 'yellow')
+  const listed =
+    chosen === 'rooms' ? [...joinNotice, ...roomRows] : sharesNotice !== null ? textRows('board-shares-notice', sharesNotice) : chosen === 'sent' ? shareRows : receivedShareRows
+  // 離線原因放最前面：清單多頁時第一頁就看得到
+  const rows = [...(isStale ? textRows('board-offline', failure, 'yellow') : []), ...listed]
+
+  const at = readAt === null ? '' : clockText(readAt)
+  const statusText = isStale ? `離線 · ${at}` : `更新於 ${at}`
+  const status = (
+    <Text key="board-status" color={isStale ? 'yellow' : undefined} dimColor={!isStale}>
+      {statusText}
+    </Text>
+  )
+  return { top, actions, actionsWidth, status, statusWidth: footWidth([{ plain: statusText }]), rows, emptyText }
+}
+
 // ── 每個 session 的開場 ──────────────────────────────────
+
+/** 已安裝的 plugin（完整的鍵）；讀不到當作沒有 */
+async function readInstalledPlugins($: EngineInterface): Promise<string[]> {
+  return installedPlugins(await files($).read(`${await homeDir($)}/${INSTALLED_PLUGINS}`))
+}
 
 /** /clear 之後隔多久重讀：等引擎換到新的 session id，寫進去的狀態才不會跟著舊的被丟掉 */
 const CLEAR_RELOAD_DELAY = 300
@@ -3002,6 +3613,8 @@ const CLEAR_RELOAD_DELAY = 300
  */
 async function loadSession($: EngineInterface, reason: Reload) {
   memory.begin(reason)
+  // /clear 清空了畫面上的等待：還在排隊的指令結果不再算數，[加入] 可以重按
+  boardJoins.clear()
   roadmapFrom.reset()
   // 教學與用法照實際有沒有在跑（/clear 時可能還在跑）；選單收起；經手只算這個 session 的
   await commit($, {
@@ -3012,9 +3625,10 @@ async function loadSession($: EngineInterface, reason: Reload) {
   })
   // 在等你：$.state 若沒跟著清空（mod 重載後開場），也對成沒在等，和 memory 的摘要一致
   await writeAll(await waitingWrites($, { kind: 'reset' }))
-  const { lastTab } = await restoreRemembered($)
-  const first = startTab(config.settings.defaultTab, lastTab)
-  await commit($, { tab: first })
+  // 裝了哪些 plugin 開場就要知道：[討論版] 不必等切到 [SKILL] 才出現
+  const [{ lastTab }, installed] = await Promise.all([restoreRemembered($), readInstalledPlugins($)])
+  const first = startTab(config.settings.defaultTab, lastTab, installed.includes(BOARD_PLUGIN))
+  await commit($, { tab: first, installedPluginKeys: installed })
 
   // 背景預載：不等它們。一開就停在 [任務] 算第一次打開 [任務]（遠端這時才讀），其他分頁的預載不連網
   const roadmapEvent: RoadmapEvent = { kind: first === 'tasks' ? 'open' : 'start' }
@@ -3192,6 +3806,8 @@ export const register: Register = (on, options) => {
     // 主對話一輪結束：等著的手打作廢（送出的 `/name` 不是 skill 時，不留到之後誤配），正在用的也結束
     const isUseChanged = watchInUse()
     if (owner === undefined) callers.turnEnded()
+    // 等著的 [加入]：屬於它的那一輪結束了就重讀
+    if (owner === undefined) boardTurnEnded($)
     // 主對話的一輪結束：輪到你（按 Esc 中斷對話框也是這裡，那一輪的等你決定一起拿掉）；
     // 正在用的也結束，一起寫（沒在用就不碰）
     if (owner === undefined) {
@@ -3320,6 +3936,23 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // 討論版：agent 進版、離開或送出分享後，開著的分頁重讀。比對在 matcher，其他工具不會進來
+  on('tool.call', { tool: 'mcp__plugin_trm-board_trm-board__board_join' as never }, async ($, e, next) => {
+    const ran = await next(e)
+    boardToolDone($, e, ran)
+    return ran
+  }).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'mcp__plugin_trm-board_trm-board__board_leave' as never }, async ($, e, next) => {
+    const ran = await next(e)
+    boardToolDone($, e, ran)
+    return ran
+  }).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'mcp__plugin_trm-board_trm-board__board_send' as never }, async ($, e, next) => {
+    const ran = await next(e)
+    boardToolDone($, e, ran)
+    return ran
+  }).catch(($, e, next) => next(e))
+
   // 背景工作的校正：對話停下時引擎給的快照（`background_tasks` 與 `session_crons`）。主對話與 subagent 停下都帶整個 session 的，
   // 處理一樣；MCP task 只從這裡進來。快照沒有擁有者，不拿它改擁有者
   on('classic.Stop', async ($, e, next) => {
@@ -3409,10 +4042,11 @@ export const register: Register = (on, options) => {
     const accent = settings.accent
     // 外框要用的狀態一次讀完。外框不讀任務板，只讀它的完成數與總數（任務板只有 [任務] 讀）；
     // 5H 倒數會隨時間變，交給畫面那一側的 Client 自己走
-    const [now, counted, currentTab, currentModel, actualEffort, chosen, busy, usageNow, allPages, indicator, waitingNow] = await Promise.all([
+    const [now, counted, chosenTab, installedKeys, currentModel, actualEffort, chosen, busy, usageNow, allPages, indicator, waitingNow] = await Promise.all([
       $.clock.now(),
       read($, progress),
       read($, tab),
+      read($, installedPluginKeys),
       read($, model),
       read($, effort),
       read($, chosenEffort),
@@ -3423,18 +4057,29 @@ export const register: Register = (on, options) => {
       read($, waiting),
     ])
 
+    // [討論版] 裝了 trm-board 才有；session 中途移除時看 [任務]
+    const hasBoard = installedKeys.includes(BOARD_PLUGIN)
+    const currentTab: Tab = chosenTab === 'board' && !hasBoard ? 'tasks' : chosenTab
+    const shownTabs = TABS.filter(t => t.id !== 'board' || hasBoard)
+
     // ── 分頁列：[任務] 的標籤帶著進度 ──
-    const tabLabel = (t: (typeof TABS)[number]) =>
-      t.id === 'tasks' && counted.total > 0 && counted.doneCount < counted.total
+    const tabLabel = (t: (typeof TABS)[number], withProgress: boolean) =>
+      withProgress && t.id === 'tasks' && counted.total > 0 && counted.doneCount < counted.total
         ? `${t.label} ${counted.doneCount}/${counted.total}`
         : t.label
     // 有留著的標示時，「設定」變色並帶記號：停在別的分頁也看得出 [設定] 裡有事
     const isFlagged = (id: Tab) => id === 'settings' && indicator !== undefined
     // 分頁列有哪幾段、多寬由 layout 算；這裡照段落畫
-    const bar = tabBarOf(
-      TABS.map(t => ({ id: t.id, label: isFlagged(t.id) ? `${t.label} ${INDICATOR_MARK}` : tabLabel(t), hotkey: t.hotkey })),
-      currentTab,
-    )
+    // 多了 [討論版] 後面板太窄放不下時，依序縮短分隔、拿掉進度；沒有 [討論版] 時維持原本的分頁列
+    const barOf = (withProgress: boolean, sep?: string) =>
+      tabBarOf(
+        shownTabs.map(t => ({ id: t.id, label: isFlagged(t.id) ? `${t.label} ${INDICATOR_MARK}` : tabLabel(t, withProgress), hotkey: t.hotkey })),
+        currentTab,
+        sep,
+      )
+    const roomy = barOf(true)
+    const tight = barOf(true, ' ')
+    const bar = !hasBoard || roomy.width <= e.props.bodyColumns ? roomy : tight.width <= e.props.bodyColumns ? tight : barOf(false, ' ')
     const { columns: cols, isTabsOnBorder } = chrome(e.props.bodyColumns, bar.width)
     const tabBar = (
       <Box key="tabs" flexDirection="row">
@@ -3571,7 +4216,9 @@ export const register: Register = (on, options) => {
           ? await basicTab($, ctx)
           : currentTab === 'skill'
             ? await skillTab($, ctx)
-            : await settingsTab($, ctx)
+            : currentTab === 'board'
+              ? await boardTab($, ctx)
+              : await settingsTab($, ctx)
     // 分頁的操作疊在下框線左端、狀態疊在右端（要翻頁時右端是翻頁鍵）；放不上的退回框內的最後幾行。
     // 有沒有要翻頁要排過才知道：兩種擺法的固定行數都交給 layout，由它決定用哪一種
     const footFor = (hasPages: boolean) =>
@@ -3590,7 +4237,8 @@ export const register: Register = (on, options) => {
       fixedRows: fixedOf(single),
       pagedFixedRows: fixedOf(paged),
       detailColumns: cols,
-      page: allPages[currentTab],
+      // mod 重載後留著的頁碼可能還沒有新分頁
+      page: allPages[currentTab] ?? 0,
       followId: content.followId,
     })
     const foot = shape.isPaged ? paged : single

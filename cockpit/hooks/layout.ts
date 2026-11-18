@@ -365,13 +365,15 @@ const TAB_BAR_EDGE = 1
 
 /**
  * 分頁列有哪幾段、畫出來多寬。寬度由這裡的段落算，畫的那邊照段落畫，不另外算一次。
+ * `sep` 是分頁之間的分隔；面板太窄時傳短一點的
  */
 export function tabBar<Id extends string>(
   tabs: readonly { id: Id; label: string; hotkey: string }[],
   current: Id,
+  sep = ' ─ ',
 ): { segments: TabSegment<Id>[]; width: number; edge: number } {
   const segments = tabs.flatMap((t, i): TabSegment<Id>[] => [
-    ...(i > 0 ? [{ kind: 'sep' as const, id: t.id, text: ' ─ ' }] : []),
+    ...(i > 0 ? [{ kind: 'sep' as const, id: t.id, text: sep }] : []),
     t.id === current
       ? { kind: 'current', id: t.id, text: t.label }
       : { kind: 'button', id: t.id, text: t.label, hotkey: t.hotkey },
